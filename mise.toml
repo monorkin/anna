@@ -1,0 +1,6 @@
+[tools]
+# mr_boxington routes cargo through the shared build cache, so worktrees and
+# sibling checkouts reuse each other's compiled crates instead of each growing
+# a full target/
+rust = { version = "latest", mr_boxington = true }
+mr-boxington = "latest"
