@@ -9,6 +9,7 @@
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -16,14 +17,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::broker::{self, Endpoint, Tool};
 use crate::claude;
-use crate::config::{self, Config};
+use crate::config;
 use crate::conversation::Conversation;
-use crate::editor::Editor;
-use crate::judge::Judge;
 use crate::logs;
-use crate::mcp::Catalog;
 use crate::paths;
-use crate::proxy::{self, Proxy};
+use crate::runtime::Runtime;
 use crate::thread_tools::{Dismiss, Hands, Reply, SendBack, StartHand, Workshop};
 
 const TOOL_TIMEOUT_MILLISECONDS: &str = "7200000";
@@ -35,41 +33,36 @@ A reviewer checks every hand's work against your brief and tells you what was ac
 You are not sandboxed and hands are, so never run code, scripts, tests or build tools from a folder a hand has worked in — have a hand do it. Reading files there is fine. \
 When something can't be done, say what you tried and what you can do instead.";
 
-pub fn wake(conversation: Arc<dyn Conversation>, message: &str) -> Result<()> {
+pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, message: &str) -> Result<()> {
     let key = conversation.key().to_string();
     let directory = paths::thread_dir(&key);
     fs::create_dir_all(&directory)?;
 
-    let config = Config::load()?;
-    let judge = Arc::new(Judge::from(&config));
-    let editor = Arc::new(Editor::new(config::style(), judge.clone()));
-    let catalog = Arc::new(Catalog::open(&config, editor.clone(), judge.clone()));
-    let proxy = Proxy::start(&paths::socket(&format!("proxy-{key}")), &[proxy::CLAUDE_API])?;
     let hands = Arc::new(Hands::default());
     let workshop = Arc::new(Workshop {
         hands: hands.clone(),
-        judge,
-        proxy_socket: proxy.socket().to_path_buf(),
+        judge: runtime.judge.clone(),
+        proxy_socket: runtime.proxy.socket().to_path_buf(),
     });
     let spoke = Arc::new(AtomicBool::new(false));
 
     let mut tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(Reply { conversation: conversation.clone(), editor: editor.clone(), spoke: spoke.clone() }),
-        Box::new(StartHand { workshop: workshop.clone(), catalog: catalog.clone() }),
+        Box::new(Reply { conversation: conversation.clone(), editor: runtime.editor.clone(), spoke: spoke.clone() }),
+        Box::new(StartHand { workshop: workshop.clone(), catalog: runtime.catalog.clone() }),
         Box::new(SendBack { workshop }),
         Box::new(Dismiss { hands: hands.clone() }),
     ];
-    tools.extend(catalog.all());
+    tools.extend(runtime.catalog.all());
     let endpoint = Endpoint::open(&paths::socket(&format!("thread-{key}")), tools)?;
 
-    logs::event("thread.woken", json!({ "conversation": key, "tools": catalog.names() }));
+    logs::event("thread.woken", json!({ "conversation": key }));
     let outcome = claude::reply_of(&mut turn(&directory, &endpoint, message)?);
     hands.discard_all();
 
     let reply = outcome.with_context(|| format!("the thread for {key} could not finish its turn"))?;
     fs::write(directory.join("session"), &reply.session_id)?;
     if !spoke.load(Ordering::Relaxed) {
-        conversation.say(&editor.polish(&reply.result)?)?;
+        conversation.say(&runtime.editor.polish(&reply.result)?)?;
     }
     logs::event("thread.slept", json!({ "conversation": key, "session": reply.session_id }));
     Ok(())
@@ -85,6 +78,14 @@ fn turn(directory: &Path, endpoint: &Endpoint, message: &str) -> Result<Command>
         .args(["--append-system-prompt", &role()]);
     if let Ok(session) = fs::read_to_string(directory.join("session")) {
         command.args(["--resume", session.trim()]);
+    }
+
+    // A thread must not outlive Anna: stopping her stops everything
+    unsafe {
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
     }
     Ok(command)
 }

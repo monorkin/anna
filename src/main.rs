@@ -3,6 +3,7 @@ mod claude;
 mod clock;
 mod config;
 mod conversation;
+mod dispatcher;
 mod editor;
 mod hand;
 mod judge;
@@ -12,7 +13,10 @@ mod mcp_cli;
 mod paths;
 mod proxy;
 mod reviewer;
+mod runtime;
 mod sandbox;
+mod setup;
+mod source;
 mod thread;
 mod thread_tools;
 
@@ -21,6 +25,7 @@ use std::sync::Arc;
 use usage::{Cli, Subcommands};
 
 use crate::conversation::Terminal;
+use crate::runtime::Runtime;
 
 /// A self-governing agent you work with like a colleague
 #[derive(Cli)]
@@ -32,6 +37,10 @@ struct Cli {
 
 #[derive(Subcommands)]
 enum Command {
+    /// Walk through the one-time setup; safe to run again
+    Setup,
+    /// Start Anna: listen on every source until stopped
+    Run,
     /// Talk to Anna from this terminal
     Chat {
         message: String,
@@ -87,8 +96,10 @@ fn main() {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Command::Setup => setup::run(),
+        Command::Run => dispatcher::run(),
         Command::Chat { message, conversation } => {
-            thread::wake(Arc::new(Terminal::new(&conversation)), &message)
+            thread::wake(&Runtime::start()?, Arc::new(Terminal::new(&conversation)), &message)
         }
         Command::Log { follow } => logs::print(follow),
         Command::Mcp { command } => match command {

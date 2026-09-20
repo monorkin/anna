@@ -40,7 +40,7 @@ impl Hand {
         }
 
         let id = format!("h{:x}", clock::nanos());
-        let directory = paths::hand_dir(&id);
+        let directory = paths::sessions_dir().join(&id);
         claude::write_hand_profile(&directory.join("profile"))?;
 
         let granted_names: Vec<String> = grant.iter().map(|it| it.name().to_string()).collect();

@@ -30,7 +30,7 @@ pub struct Verdict {
 }
 
 pub fn review(project: &Path, brief: &str, report: &str, proxy_socket: &Path) -> Result<Verdict> {
-    let directory = paths::data_dir().join("reviews").join(format!("r{:x}", clock::nanos()));
+    let directory = paths::sessions_dir().join(format!("r{:x}", clock::nanos()));
     claude::write_hand_profile(&directory.join("profile"))?;
 
     let sandbox = Sandbox {

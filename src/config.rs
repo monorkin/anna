@@ -20,6 +20,45 @@ pub struct Config {
     pub jev_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp_servers: BTreeMap<String, McpServer>,
+    /// Where people talk to Anna, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sources: BTreeMap<String, Source>,
+    /// Who Anna listens to: the sender id a source reports, to the name she
+    /// knows them by. Anyone else is ignored.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub people: BTreeMap<String, String>,
+}
+
+/// A source is an MCP server Anna also listens on. There is no push in MCP,
+/// so listening is calling one of the server's own tools on a timer and
+/// picking the new messages out of the JSON it answers with. The four
+/// pointers are JSON pointers into each item.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Source {
+    pub server: String,
+    pub watch: Call,
+    #[serde(default = "default_interval")]
+    pub every_seconds: u64,
+    /// JSON pointer to the array of messages in the watch tool's answer.
+    pub items: String,
+    pub id: String,
+    pub conversation: String,
+    pub sender: String,
+    pub text: String,
+    /// The call that answers in a conversation. `{conversation}` and
+    /// `{text}` in its arguments are filled in.
+    pub reply: Call,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Call {
+    pub tool: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+fn default_interval() -> u64 {
+    60
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

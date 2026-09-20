@@ -13,6 +13,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -122,6 +123,7 @@ impl Drop for Server {
 /// fingerprint.
 pub struct Catalog {
     tools: Vec<Arc<Offered>>,
+    servers: BTreeMap<String, Arc<Mutex<Server>>>,
 }
 
 struct Offered {
@@ -138,11 +140,13 @@ struct Offered {
 impl Catalog {
     pub fn open(config: &Config, editor: Arc<Editor>, judge: Arc<Judge>) -> Catalog {
         let mut tools = Vec::new();
+        let mut servers = BTreeMap::new();
 
         for (server_name, settings) in &config.mcp_servers {
             match listed(settings) {
                 Ok((server, listing)) => {
                     let server = Arc::new(Mutex::new(server));
+                    servers.insert(server_name.clone(), server.clone());
                     for tool in &listing {
                         let remote_name = tool["name"].as_str().unwrap_or_default().to_string();
                         tools.push(Arc::new(Offered {
@@ -163,11 +167,19 @@ impl Catalog {
             }
         }
 
-        Catalog { tools }
+        Catalog { tools, servers }
     }
 
-    pub fn names(&self) -> Vec<&str> {
-        self.tools.iter().map(|it| it.name.as_str()).collect()
+    /// A call Anna makes herself — polling a source, answering in a
+    /// conversation — rather than one a session asked for. Nothing is
+    /// restyled or screened here; the caller does what its text needs.
+    pub fn call(&self, server: &str, tool: &str, arguments: &Value) -> Result<String> {
+        self.servers
+            .get(server)
+            .with_context(|| format!("there is no running server called {server}"))?
+            .lock()
+            .unwrap()
+            .call(tool, arguments)
     }
 
     pub fn all(&self) -> Vec<Box<dyn Tool>> {
