@@ -5,6 +5,10 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+# Anna is built on these two: katami is her memory, ax her Claude accounts.
+# They're sibling checkouts until they're published somewhere cargo can fetch.
+katami = { path = "../katami" }
+ax = { path = "../ax" }
 anyhow = "1.0.104"
 dirs = "6.0.0"
 libc = "0.2.189"

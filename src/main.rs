@@ -60,6 +60,25 @@ enum Command {
         #[usage(subcommand)]
         command: McpCommand,
     },
+    /// Inspect and manage what Anna remembers
+    Memory {
+        #[usage(subcommand)]
+        command: katami::cli::MemoryCommand,
+    },
+    /// Manage the Claude subscriptions Anna works with
+    Claude {
+        #[usage(subcommand)]
+        command: ClaudeCommand,
+    },
+}
+
+#[derive(Subcommands)]
+enum ClaudeCommand {
+    /// Manage the accounts in the rotation
+    Account {
+        #[usage(subcommand)]
+        command: ax::cli::AccountCommand,
+    },
 }
 
 #[derive(Subcommands)]
@@ -89,11 +108,20 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    if let Err(error) = run(Cli::parse()) {
+    let result = match std::env::args().nth(1).as_deref() {
+        Some(command) if KATAMI_RUNS_ITSELF_AS.contains(&command) => katami::cli::run(katami::cli::Cli::parse()),
+        _ => run(Cli::parse()),
+    };
+    if let Err(error) = result {
         eprintln!("error: {error:#}");
         std::process::exit(1);
     }
 }
+
+/// katami runs its own executable for these: the hooks it registers with
+/// claude, and the reviews and curation it spawns in the background. Inside
+/// Anna that executable is Anna, so she hands them straight to katami.
+const KATAMI_RUNS_ITSELF_AS: [&str; 3] = ["hook", "review", "curate"];
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
@@ -108,6 +136,14 @@ fn run(cli: Cli) -> Result<()> {
             McpCommand::List => mcp_cli::list(),
             McpCommand::Remove { name } => mcp_cli::remove(&name),
             McpCommand::Prose { name, tool, argument } => mcp_cli::mark_prose(&name, &tool, &argument),
+        },
+        Command::Memory { command } => katami::cli::run(katami::cli::Cli {
+            command: katami::cli::Command::Memory { command },
+        }),
+        Command::Claude { command } => match command {
+            ClaudeCommand::Account { command } => ax::cli::run(ax::cli::Cli {
+                command: ax::cli::Command::Account { command },
+            }),
         },
     }
 }

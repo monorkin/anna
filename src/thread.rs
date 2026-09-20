@@ -5,8 +5,15 @@
 //! thread is not sandboxed; its hands are. It speaks through the reply tool,
 //! and if a turn ends without it having said anything, its closing words are
 //! said for it rather than lost.
+//!
+//! Every turn runs under katami's supervision, which is where a thread's
+//! memory comes from: what Anna has learned is put in front of it, and the
+//! turn is reviewed afterwards for things worth remembering. Hands never run
+//! this way — they don't read memory, and what they write isn't trusted
+//! enough to become it.
 
 use anyhow::Result;
+use katami::supervisor::Supervision;
 use serde_json::json;
 use std::fs::{self, File};
 use std::io::Read;
@@ -58,7 +65,12 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, message: &st
 
     logs::event("thread.woken", json!({ "conversation": key }));
     let session = Session::of(&directory)?;
-    let outcome = claude::reply_of(&mut turn(&directory, &endpoint, &session, message)?, runtime.outside.time_limit);
+    let memory = Supervision::begin(&directory, &key)?;
+    let mut command = turn(&directory, &endpoint, &session, message)?;
+    memory.cover(&mut command);
+
+    let outcome = claude::reply_of(&mut command, runtime.outside.time_limit);
+    memory.finish();
     hands.discard_all();
 
     match outcome {

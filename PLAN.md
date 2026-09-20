@@ -38,19 +38,26 @@ source:
   of their own. A thread's session id is chosen up front, so a stopped turn
   resumes; she says she ran out of time and offers to continue.
 - mise's tools inside the sandbox, so hands and reviewers can run tests.
+- One binary. katami and ax are library crates with a thin binary each
+  (`cli.rs` holds their command line), and Anna depends on both by path.
+  `anna memory …` and `anna claude account …` are their own subcommands
+  mounted as they are. katami re-runs its executable as `hook`, `review` and
+  `curate`; inside Anna that executable is Anna, and she hands those three
+  straight to `katami::cli`.
+- Memory for threads. katami learned to supervise without a terminal
+  (`supervise_headless`) and grew `Supervision` — begin, cover a command,
+  finish — for a program that runs its own sessions. Every thread turn runs
+  under it. Tested live in a sandboxed store: something said in one
+  conversation was reviewed into a memory and recalled from another.
 
 Not built, or not working yet:
 
-- **Memory.** katami only supervises when it has a terminal
-  (`launch.rs`, `supervise_or_pipe`), so a headless thread launched through it
-  gets no memory, and the extra process in between made threads harder to
-  stop. Threads run plain `claude` until katami can supervise over pipes.
-  After that: `origin` and speaker in katami, then the hand-transcript
-  pipeline with the Jev risk score.
-- **Accounts.** `anna run` starts `ax auto-switch` next to itself, which
-  covers threads and every new hand. Not run live, because it moves the real
-  default login. Still missing: moving a long-running hand mid-session.
-- **One binary.** katami and ax are used as installed commands for now.
+- **Memory for hands.** Threads remember now (see below). What a hand learned
+  still goes nowhere: that needs `origin` and speaker in katami, then the
+  hand-transcript pipeline with the Jev risk score.
+- **Accounts, live.** `anna run` runs ax's auto-switch in-process, which covers
+  threads and every new hand. Not run live, because it moves the real default
+  login. Still missing: moving a long-running hand mid-session.
 - **The config as a ceiling.** `people` decides who is heard and
   `minutes_per_run` is the budget. Who may ask for what, and the widest grant
   a hand can get, don't exist yet — that needs your call on the shape.
@@ -293,7 +300,8 @@ poller and dispatcher, setup.
 
 Next:
 
-1. katami: supervise headless sessions, so threads get memory.
+1. Commit and release the katami and ax changes, then point Anna at them as
+   git dependencies instead of sibling folders.
 2. Anna's own accounts on Basecamp and HEY; configure them as sources and see
    what their watch tools really answer with.
 3. The config as a ceiling: who may ask for what, the widest grant, a per-task
@@ -301,8 +309,7 @@ Next:
 4. Registries through the proxy, per hand; Rust inside the sandbox.
 5. katami `origin` and speaker; hand transcripts into memory through the Jev
    risk score.
-6. katami and ax as libraries, one binary; moving a running hand to another
-   account.
+6. Moving a running hand to another account.
 7. Move to the machine she runs on. Then Fizzy and GitHub.
 
 ## Open questions
