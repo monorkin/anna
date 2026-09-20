@@ -15,6 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::toolchains::Toolchains;
+
 const INSIDE: &str = r#"
 socat TCP-LISTEN:3128,fork,bind=127.0.0.1 UNIX-CONNECT:/run/proxy.sock &
 sleep 0.3
@@ -24,15 +26,22 @@ exec /opt/claude "$@"
 pub const BROKER_INSIDE: &str = "/run/broker.sock";
 const GIT_PARTS_THAT_RUN_CODE: [&str; 3] = [".git/config", ".git/hooks", ".git/modules"];
 
-pub struct Sandbox {
+/// What every sandbox of this process is given from outside: the way to
+/// Claude, and the tools it can run.
+pub struct Outside {
+    pub proxy_socket: PathBuf,
+    pub toolchains: Toolchains,
+}
+
+pub struct Sandbox<'outside> {
     pub project: PathBuf,
     pub profile: PathBuf,
-    pub proxy_socket: PathBuf,
+    pub outside: &'outside Outside,
     pub broker_socket: Option<PathBuf>,
     pub writable: bool,
 }
 
-impl Sandbox {
+impl Sandbox<'_> {
     /// `claude` inside the sandbox; whatever arguments the caller adds go to
     /// claude.
     pub fn claude(&self, claude_binary: &Path) -> Command {
@@ -52,6 +61,9 @@ impl Sandbox {
         }
 
         self.bind_project(&mut command);
+        if let Some(installs) = &self.outside.toolchains.installs {
+            command.arg("--ro-bind").arg(installs).arg(installs);
+        }
         command
             .arg("--ro-bind")
             .arg(claude_binary)
@@ -60,7 +72,7 @@ impl Sandbox {
             .arg(&self.profile)
             .arg("/profile")
             .arg("--ro-bind")
-            .arg(&self.proxy_socket)
+            .arg(&self.outside.proxy_socket)
             .arg("/run/proxy.sock");
         if let Some(broker_socket) = &self.broker_socket {
             command.arg("--ro-bind").arg(broker_socket).arg(BROKER_INSIDE);
@@ -69,7 +81,7 @@ impl Sandbox {
         command
             .args(["--chdir", "/work"])
             .args(["--setenv", "HOME", "/home/hand"])
-            .args(["--setenv", "PATH", "/usr/bin"])
+            .args(["--setenv", "PATH", &self.outside.toolchains.path()])
             .args(["--setenv", "CLAUDE_CONFIG_DIR", "/profile"])
             .args(["--setenv", "HTTPS_PROXY", "http://127.0.0.1:3128"])
             .args(["/usr/bin/bash", "-c", INSIDE, "sandbox"]);
@@ -134,10 +146,14 @@ mod tests {
         fs::write(project.join(".git/config"), "").unwrap();
         let project_path = project.to_str().unwrap();
 
+        let outside = Outside {
+            proxy_socket: PathBuf::from("/run/anna/proxy.sock"),
+            toolchains: Toolchains::default(),
+        };
         let arguments = arguments_of(&Sandbox {
             project: project.clone(),
             profile: PathBuf::from("/data/hands/h1/profile"),
-            proxy_socket: PathBuf::from("/run/anna/proxy.sock"),
+            outside: &outside,
             broker_socket: None,
             writable: true,
         });
@@ -160,15 +176,27 @@ mod tests {
 
     #[test]
     fn a_reviewer_can_write_nothing_in_the_project() {
+        let installs = PathBuf::from("/home/someone/.local/share/mise/installs");
+        let outside = Outside {
+            proxy_socket: PathBuf::from("/run/anna/proxy.sock"),
+            toolchains: Toolchains {
+                installs: Some(installs.clone()),
+                bins: vec![installs.join("ruby/3.4.7/bin")],
+            },
+        };
         let arguments = arguments_of(&Sandbox {
             project: PathBuf::from("/home/someone/project"),
             profile: PathBuf::from("/data/reviews/r1/profile"),
-            proxy_socket: PathBuf::from("/run/anna/proxy.sock"),
+            outside: &outside,
             broker_socket: Some(PathBuf::from("/run/anna/hand-h1.sock")),
             writable: false,
         });
 
         assert_eq!(binds(&arguments, "--bind"), [("/data/reviews/r1/profile", "/profile")]);
+        assert!(binds(&arguments, "--ro-bind").contains(&(installs.to_str().unwrap(), installs.to_str().unwrap())));
+        assert!(arguments.windows(3).any(|it| {
+            it[0] == "--setenv" && it[1] == "PATH" && it[2] == "/home/someone/.local/share/mise/installs/ruby/3.4.7/bin:/usr/bin"
+        }));
         assert!(binds(&arguments, "--ro-bind").contains(&("/home/someone/project", "/work")));
         assert!(binds(&arguments, "--ro-bind").contains(&("/run/anna/hand-h1.sock", BROKER_INSIDE)));
     }

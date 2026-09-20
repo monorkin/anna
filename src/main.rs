@@ -19,6 +19,7 @@ mod setup;
 mod source;
 mod thread;
 mod thread_tools;
+mod toolchains;
 
 use anyhow::Result;
 use std::sync::Arc;

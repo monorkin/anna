@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +18,7 @@ use crate::judge::{Judge, MANIPULATION_QUESTION, SUSPICIOUS};
 use crate::logs;
 use crate::mcp::Catalog;
 use crate::reviewer::{self, Verdict};
+use crate::sandbox::Outside;
 
 const ROUNDS_BEFORE_RETHINKING: u32 = 3;
 
@@ -169,7 +170,7 @@ impl Tool for Dismiss {
 pub struct Workshop {
     pub hands: Arc<Hands>,
     pub judge: Arc<Judge>,
-    pub proxy_socket: PathBuf,
+    pub outside: Arc<Outside>,
 }
 
 impl Workshop {
@@ -179,8 +180,8 @@ impl Workshop {
     fn round(&self, mut hand: Hand, ask: &str) -> Result<String> {
         let id = hand.id().to_string();
         let outcome = hand
-            .work(ask, &self.proxy_socket)
-            .and_then(|report| reviewer::review(hand.project(), &hand.asked(), &report, &self.proxy_socket));
+            .work(ask, &self.outside)
+            .and_then(|report| reviewer::review(hand.project(), &hand.asked(), &report, &self.outside));
 
         match outcome {
             Ok(verdict) => {

@@ -18,13 +18,16 @@ use crate::logs;
 use crate::mcp::Catalog;
 use crate::paths;
 use crate::proxy::{self, Proxy};
+use crate::sandbox::Outside;
+use crate::toolchains::Toolchains;
 
 pub struct Runtime {
     pub config: Config,
     pub judge: Arc<Judge>,
     pub editor: Arc<Editor>,
     pub catalog: Arc<Catalog>,
-    pub proxy: Proxy,
+    pub outside: Arc<Outside>,
+    _proxy: Proxy,
 }
 
 impl Runtime {
@@ -36,13 +39,18 @@ impl Runtime {
         let editor = Arc::new(Editor::new(config::style(), judge.clone()));
         let catalog = Arc::new(Catalog::open(&config, editor.clone(), judge.clone()));
         let proxy = Proxy::start(&paths::socket("proxy"), &[proxy::CLAUDE_API])?;
+        let outside = Arc::new(Outside {
+            proxy_socket: proxy.socket().to_path_buf(),
+            toolchains: Toolchains::discover(),
+        });
 
         Ok(Runtime {
             config,
             judge,
             editor,
             catalog,
-            proxy,
+            outside,
+            _proxy: proxy,
         })
     }
 }

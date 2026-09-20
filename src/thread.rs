@@ -42,7 +42,7 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, message: &st
     let workshop = Arc::new(Workshop {
         hands: hands.clone(),
         judge: runtime.judge.clone(),
-        proxy_socket: runtime.proxy.socket().to_path_buf(),
+        outside: runtime.outside.clone(),
     });
     let spoke = Arc::new(AtomicBool::new(false));
 

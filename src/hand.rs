@@ -15,7 +15,7 @@ use crate::claude;
 use crate::clock;
 use crate::logs;
 use crate::paths;
-use crate::sandbox::{self, Sandbox};
+use crate::sandbox::{self, Outside, Sandbox};
 
 pub struct Hand {
     id: String,
@@ -81,12 +81,12 @@ impl Hand {
         self.rejections
     }
 
-    pub fn work(&mut self, brief: &str, proxy_socket: &Path) -> Result<String> {
+    pub fn work(&mut self, brief: &str, outside: &Outside) -> Result<String> {
         self.asked.push(brief.to_string());
         let sandbox = Sandbox {
             project: self.project.clone(),
             profile: self.directory.join("profile"),
-            proxy_socket: proxy_socket.to_path_buf(),
+            outside,
             broker_socket: self.granted.as_ref().map(|it| it.socket().to_path_buf()),
             writable: true,
         };

@@ -18,7 +18,7 @@ use crate::claude;
 use crate::clock;
 use crate::logs;
 use crate::paths;
-use crate::sandbox::Sandbox;
+use crate::sandbox::{Outside, Sandbox};
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Verdict {
@@ -29,14 +29,14 @@ pub struct Verdict {
     pub notes: String,
 }
 
-pub fn review(project: &Path, brief: &str, report: &str, proxy_socket: &Path) -> Result<Verdict> {
+pub fn review(project: &Path, brief: &str, report: &str, outside: &Outside) -> Result<Verdict> {
     let directory = paths::sessions_dir().join(format!("r{:x}", clock::nanos()));
     claude::write_hand_profile(&directory.join("profile"))?;
 
     let sandbox = Sandbox {
         project: project.to_path_buf(),
         profile: directory.join("profile"),
-        proxy_socket: proxy_socket.to_path_buf(),
+        outside,
         broker_socket: None,
         writable: false,
     };

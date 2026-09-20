@@ -48,9 +48,13 @@ Not built, or not working yet:
   what, the widest grant, and the per-task budget don't exist yet.
 - **Real sources.** Anna has no account of her own anywhere, so no source has
   been configured against a real server.
-- **Toolchains in the sandbox.** A hand sees /usr and its project. Anything
-  installed under the home directory — mise's Ruby and its gems, say — isn't
-  there, so a hand often can't run a project's tests.
+- **Dependencies and Rust in the sandbox.** mise's tools are there now: its
+  installs folder is bound read-only and on the hand's PATH, listed from the
+  home directory so a hand's own `mise.toml` is never read on the host. What
+  is still missing is anything that needs a registry — `bundle install`,
+  `npm install`, `cargo build` — since a hand has no network, and Rust itself,
+  which lives under cargo's and rustup's folders next to credentials. Likely
+  answer: registries as something the proxy can be told to allow per hand.
 - The in-flight table, the classifier-driven dispatcher (routing, model
   choice), and transcripts of hands being kept for memory.
 
@@ -286,7 +290,7 @@ Next:
    what their watch tools really answer with.
 3. The config as a ceiling: who may ask for what, the widest grant, a per-task
    budget.
-4. Toolchains inside the sandbox.
+4. Registries through the proxy, per hand; Rust inside the sandbox.
 5. katami `origin` and speaker; hand transcripts into memory through the Jev
    risk score.
 6. katami and ax as libraries, one binary; moving a running hand to another
