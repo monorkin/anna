@@ -72,6 +72,11 @@ enum McpCommand {
 }
 
 fn main() {
+    // Rust ignores SIGPIPE, which turns `anna log | head` into a panic
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     if let Err(error) = run(Cli::parse()) {
         eprintln!("error: {error:#}");
         std::process::exit(1);

@@ -1,4 +1,5 @@
 /target
+/.claude/worktrees
 /dist
 .env
 /spikes/injection-detection/corpus/clean_real.jsonl

@@ -21,7 +21,7 @@ use crate::judge::Judge;
 use crate::logs;
 
 const FOLLOWS_STYLE: f64 = 0.5;
-const SAME_MEANING: f64 = 0.7;
+const UNFAITHFUL: f64 = 0.75;
 
 pub struct Editor {
     style: Option<String>,
@@ -50,28 +50,38 @@ impl Editor {
 
     fn restyle(&self, style: &str, text: &str) -> Result<String> {
         let rewrite = claude::ask_haiku(&rewrite_prompt(style), text)?;
-        if self.faithful(text, &rewrite)? {
-            logs::event("editor.rewrote", json!({ "from": text.len(), "to": rewrite.len() }));
+        let unfaithfulness = self.unfaithfulness(text, &rewrite)?;
+
+        if unfaithfulness < UNFAITHFUL {
+            logs::event("editor.rewrote", json!({ "from": text.len(), "to": rewrite.len(), "unfaithfulness": unfaithfulness }));
             Ok(rewrite)
         } else {
-            logs::event("editor.rejected", json!({ "length": text.len() }));
+            logs::event("editor.rejected", json!({ "unfaithfulness": unfaithfulness, "original": text, "rewrite": rewrite }));
             bail!(
                 "This wasn't sent. It doesn't follow the style below, and it couldn't be restyled without changing what it says. Rewrite it yourself and send it again.\n\n{style}"
             )
         }
     }
 
-    fn faithful(&self, original: &str, rewrite: &str) -> Result<bool> {
+    /// How sure the judge is that the rewrite says something else than the
+    /// original did — the worse of inventing and dropping, asked separately
+    /// because one question about both can't tell a good rewrite from one that
+    /// lost a fact. A rewrite that lost or altered a code block is certain.
+    fn unfaithfulness(&self, original: &str, rewrite: &str) -> Result<f64> {
         if code_blocks(original).iter().all(|block| rewrite.contains(block)) {
             let pair = format!("FIRST TEXT:\n{original}\n\nSECOND TEXT:\n{rewrite}");
-            Ok(self.judge.probability(SAME_MEANING_QUESTION, &pair)? >= SAME_MEANING)
+            let invents = self.judge.probability(INVENTS_QUESTION, &pair)?;
+            let drops = self.judge.probability(DROPS_QUESTION, &pair)?;
+            Ok(invents.max(drops))
         } else {
-            Ok(false)
+            Ok(1.0)
         }
     }
 }
 
-const SAME_MEANING_QUESTION: &str = "Two texts follow. Does the second text state the same facts, make the same requests, and reach the same conclusions as the first, leaving out nothing the reader needs and adding nothing that wasn't there? Differences in length, tone and wording don't matter.";
+const INVENTS_QUESTION: &str = "Two texts follow. The second is a shorter, plainer rewrite of the first. Does the rewrite say something the first text does not: a different or extra fact, name, number, cause, action or outcome, or the opposite of what the first text says?";
+
+const DROPS_QUESTION: &str = "Two texts follow. The second is a shorter, plainer rewrite of the first. List in your head the concrete things the first text reports: what happened, why, what was done about it, and what the state is now, plus any request or question. Is at least one of those missing from the rewrite? Greetings, hedging, filler, apologies and offers of further help are not concrete things.";
 
 fn follows_style_question(style: &str) -> String {
     format!(
