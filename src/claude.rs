@@ -25,10 +25,7 @@ pub struct Reply {
 }
 
 pub fn binary() -> Result<PathBuf> {
-    let path = std::env::var_os("PATH").context("PATH is not set")?;
-    std::env::split_paths(&path)
-        .map(|directory| directory.join("claude"))
-        .find(|candidate| candidate.is_file())
+    paths::program("claude")
         .context("claude is not on the PATH")?
         .canonicalize()
         .context("could not resolve the claude binary")

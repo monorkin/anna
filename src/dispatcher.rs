@@ -13,6 +13,8 @@
 use anyhow::{Result, bail};
 use serde_json::json;
 use std::collections::HashMap;
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread as os_thread;
 use std::time::Duration;
@@ -21,6 +23,7 @@ use crate::config::Source;
 use crate::conversation::Conversation;
 use crate::judge::{MANIPULATION_QUESTION, SUSPICIOUS};
 use crate::logs;
+use crate::paths;
 use crate::runtime::Runtime;
 use crate::source::{self, Message, Seen, Sourced};
 use crate::thread;
@@ -47,6 +50,11 @@ pub fn run() -> Result<()> {
         bail!("there are no sources to listen on yet; `anna chat` works without them");
     }
 
+    let _accounts = if runtime.config.rotate_accounts {
+        rotating_accounts()
+    } else {
+        None
+    };
     let turns = Arc::new(Turns::default());
     let listeners: Vec<_> = runtime
         .config
@@ -65,6 +73,33 @@ pub fn run() -> Result<()> {
         let _ = listener.join();
     }
     Ok(())
+}
+
+/// `ax auto-switch` for as long as Anna runs, when ax is installed. Threads
+/// run as the default Claude login and every new hand copies its token from
+/// there, so moving the default login to the account with the most headroom
+/// covers both.
+fn rotating_accounts() -> Option<Child> {
+    let ax = paths::program("ax")?;
+    let mut command = Command::new(ax);
+    command.arg("auto-switch").stdout(Stdio::null()).stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+
+    match command.spawn() {
+        Ok(child) => {
+            logs::event("accounts.rotating", json!({ "with": "ax auto-switch" }));
+            Some(child)
+        }
+        Err(error) => {
+            logs::event("accounts.not_rotating", json!({ "error": error.to_string() }));
+            None
+        }
+    }
 }
 
 fn listen(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Source) {

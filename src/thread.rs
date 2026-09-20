@@ -69,7 +69,7 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, message: &st
 }
 
 fn turn(directory: &Path, endpoint: &Endpoint, message: &str) -> Result<Command> {
-    let mut command = Command::new(claude::binary()?);
+    let mut command = remembering_claude()?;
     command
         .current_dir(directory)
         .env("MCP_TOOL_TIMEOUT", TOOL_TIMEOUT_MILLISECONDS)
@@ -88,6 +88,21 @@ fn turn(directory: &Path, endpoint: &Endpoint, message: &str) -> Result<Command>
         });
     }
     Ok(command)
+}
+
+/// Claude under katami when katami is installed: the thread then gets what
+/// Anna has learned put in front of it, and its conversation is reviewed for
+/// things worth remembering. Hands never run this way — they don't read
+/// memory, and what they write isn't trusted enough to become it.
+fn remembering_claude() -> Result<Command> {
+    match paths::program("katami") {
+        Some(katami) => {
+            let mut command = Command::new(katami);
+            command.arg("claude");
+            Ok(command)
+        }
+        None => Ok(Command::new(claude::binary()?)),
+    }
 }
 
 fn role() -> String {

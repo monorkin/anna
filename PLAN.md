@@ -1,7 +1,58 @@
 # Plan
 
-Where things stand as of 2026-09-20. Nothing is built yet apart from the
-spike in `spikes/injection-detection/`.
+Where things stand as of 2026-09-20.
+
+## Built
+
+Works end to end and is tested live, against scratch projects and a fake
+source:
+
+- `anna chat` — a terminal conversation. A thread is `claude -p`, resumed per
+  conversation.
+- The broker — MCP over a unix socket per session, hand-rolled (no tokio, no
+  rmcp), reached through socat. Which socket a call arrives on is who is
+  calling.
+- Hands — bubblewrap, an allowlist CONNECT proxy as the only way out, a
+  profile holding the access token and no refresh token. `.git/config`,
+  `.git/hooks` and `.git/modules` are read-only inside, and `.git` is its own
+  mount, because the brain runs git in that folder later.
+- The reviewer — the same sandbox with the project read-only. The thread gets
+  its verdict and never the hand's own report. Three rejections tell the
+  thread to change approach.
+- Grants — `start_hand` can pass on named tools; tools that speak to people
+  can't be granted.
+- MCP servers added from outside (`anna mcp add/list/remove/prose`), their
+  tool listing fingerprinted, results screened by the judge.
+- The judge — Jev with a key, haiku without. No answer counts as a yes.
+- The editor — scores against the style, haiku rewrites, two fidelity
+  questions (does the rewrite invent anything, does it drop anything) because
+  one question couldn't tell a good rewrite from one that lost a fact.
+- `anna run` — sources as config, one generic poller, a dispatcher: backlog
+  ignored on first look, unknown senders ignored, injections refused with a
+  reply, one turn at a time per conversation.
+- `anna setup`, `anna log -f`, cleanup of profiles left by dead processes,
+  threads that die with Anna.
+
+Not built, or not working yet:
+
+- **Memory.** Threads launch through `katami claude` when katami is installed,
+  but katami only supervises when it has a terminal, so headless threads get
+  no memory today. katami needs to supervise over pipes. After that: `origin`
+  and speaker in katami, then the hand-transcript pipeline with the Jev risk
+  score.
+- **Accounts.** `anna run` starts `ax auto-switch` next to itself, which
+  covers threads and every new hand. Not run live, because it moves the real
+  default login. Still missing: moving a long-running hand mid-session.
+- **One binary.** katami and ax are used as installed commands for now.
+- **The config as a ceiling.** `people` decides who is heard. Who may ask for
+  what, the widest grant, and the per-task budget don't exist yet.
+- **Real sources.** Anna has no account of her own anywhere, so no source has
+  been configured against a real server.
+- **Toolchains in the sandbox.** A hand sees /usr and its project. Anything
+  installed under the home directory — mise's Ruby and its gems, say — isn't
+  there, so a hand often can't run a project's tests.
+- The in-flight table, the classifier-driven dispatcher (routing, model
+  choice), and transcripts of hands being kept for memory.
 
 ## Decided
 
@@ -224,19 +275,23 @@ pinned to one account. Needed:
 
 ## Order
 
-0. Checks before building anything:
-   - `claude -p` running under katami's PTY wrapper
-   - claude inside bwrap with only the proxy for network
-   - ax swapping a running profile's credentials mid-session
-   - ~~Jev vs haiku vs sonnet for injection detection~~ done
-1. katami and ax as libraries; the two ax changes.
-2. Anna's core: SQLite, setup config, `anna setup`, dispatcher, thread start and
-   resume. Talk to her from the terminal first, no sources yet.
-3. Hands: sandbox, broker, one grant, the review loop.
-4. katami `origin` and speaker; the memory pipeline with Jev.
-5. First source: Basecamp — Anna's account, the poller, `basecamp mcp` behind
-   the broker, the editor.
-6. Move to the machine she runs on. Then Fizzy, HEY, GitHub.
+Done: the pre-build checks (`spikes/sandbox/RESULTS.md`), the core, hands, the
+review loop, the broker, external MCP servers, the judge, the editor, the
+poller and dispatcher, setup.
+
+Next:
+
+1. katami: supervise headless sessions, so threads get memory.
+2. Anna's own accounts on Basecamp and HEY; configure them as sources and see
+   what their watch tools really answer with.
+3. The config as a ceiling: who may ask for what, the widest grant, a per-task
+   budget.
+4. Toolchains inside the sandbox.
+5. katami `origin` and speaker; hand transcripts into memory through the Jev
+   risk score.
+6. katami and ax as libraries, one binary; moving a running hand to another
+   account.
+7. Move to the machine she runs on. Then Fizzy and GitHub.
 
 ## Open questions
 

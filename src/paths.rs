@@ -15,6 +15,14 @@ pub fn claude_config_home() -> PathBuf {
     }
 }
 
+/// Where a program lives, if it is installed.
+pub fn program(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
 pub fn log_file() -> PathBuf {
     data_dir().join("log.jsonl")
 }

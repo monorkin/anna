@@ -14,7 +14,7 @@ use std::path::Path;
 
 use crate::paths;
 
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jev_api_key: Option<String>,
@@ -27,6 +27,29 @@ pub struct Config {
     /// knows them by. Anyone else is ignored.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub people: BTreeMap<String, String>,
+    /// Set to false when something else already runs `ax auto-switch`.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub rotate_accounts: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(value: &bool) -> bool {
+    *value
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            jev_api_key: None,
+            mcp_servers: BTreeMap::new(),
+            sources: BTreeMap::new(),
+            people: BTreeMap::new(),
+            rotate_accounts: true,
+        }
+    }
 }
 
 /// A source is an MCP server Anna also listens on. There is no push in MCP,

@@ -36,7 +36,16 @@ anna setup
 
 ```bash
 # Running
-anna run # starts anna
+anna run                                  # starts anna: she listens on her sources until stopped
+anna chat "the deploy is red, have a look" # or talk to her from this terminal
+anna chat --conversation billing "..."    # each conversation is its own thread
+anna log -f                               # watch what she's doing
+
+# MCP servers: how she acts, and where she listens
+anna mcp add basecamp -- basecamp mcp     # also accepts a server's changed tools
+anna mcp list
+anna mcp prose basecamp create_comment content   # this argument is prose for people: restyle it
+anna mcp remove basecamp
 
 # Subscription management
 anna claude account add # add the current Claude Code account to the rotation
