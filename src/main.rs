@@ -11,6 +11,8 @@ mod mcp;
 mod mcp_cli;
 mod paths;
 mod proxy;
+mod reviewer;
+mod sandbox;
 mod thread;
 mod thread_tools;
 

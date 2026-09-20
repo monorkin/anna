@@ -1,0 +1,175 @@
+//! The sandbox a Claude Code session runs in when it touches a project.
+//!
+//! Bubblewrap with every namespace unshared. The session sees a read-only
+//! /usr, the project at /work, its own profile, and the proxy's socket — no
+//! home directory, no network. socat turns the socket into the localhost
+//! proxy Claude Code is pointed at, so the Claude API is the only thing it
+//! can reach. Permissions are skipped inside, because the sandbox is the
+//! permission system.
+//!
+//! A hand gets the project writable, except for the parts of .git that run
+//! code: the brain isn't sandboxed and will run git in that folder later, and
+//! a hook or an fsmonitor command planted by a hand would run as the brain.
+//! A reviewer gets the whole project read-only.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const INSIDE: &str = r#"
+socat TCP-LISTEN:3128,fork,bind=127.0.0.1 UNIX-CONNECT:/run/proxy.sock &
+sleep 0.3
+exec /opt/claude "$@"
+"#;
+
+pub const BROKER_INSIDE: &str = "/run/broker.sock";
+const GIT_PARTS_THAT_RUN_CODE: [&str; 3] = [".git/config", ".git/hooks", ".git/modules"];
+
+pub struct Sandbox {
+    pub project: PathBuf,
+    pub profile: PathBuf,
+    pub proxy_socket: PathBuf,
+    pub broker_socket: Option<PathBuf>,
+    pub writable: bool,
+}
+
+impl Sandbox {
+    /// `claude` inside the sandbox; whatever arguments the caller adds go to
+    /// claude.
+    pub fn claude(&self, claude_binary: &Path) -> Command {
+        let mut command = Command::new("bwrap");
+        command
+            .args(["--unshare-all", "--die-with-parent"])
+            .args(["--ro-bind", "/usr", "/usr"])
+            .args(["--symlink", "usr/bin", "/bin"])
+            .args(["--symlink", "usr/lib", "/lib"])
+            .args(["--symlink", "usr/lib", "/lib64"])
+            .args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/home/hand"]);
+
+        for certificates in ["/etc/ssl", "/etc/ca-certificates", "/etc/pki"] {
+            if Path::new(certificates).exists() {
+                command.args(["--ro-bind", certificates, certificates]);
+            }
+        }
+
+        self.bind_project(&mut command);
+        command
+            .arg("--ro-bind")
+            .arg(claude_binary)
+            .arg("/opt/claude")
+            .arg("--bind")
+            .arg(&self.profile)
+            .arg("/profile")
+            .arg("--ro-bind")
+            .arg(&self.proxy_socket)
+            .arg("/run/proxy.sock");
+        if let Some(broker_socket) = &self.broker_socket {
+            command.arg("--ro-bind").arg(broker_socket).arg(BROKER_INSIDE);
+        }
+
+        command
+            .args(["--chdir", "/work"])
+            .args(["--setenv", "HOME", "/home/hand"])
+            .args(["--setenv", "PATH", "/usr/bin"])
+            .args(["--setenv", "CLAUDE_CONFIG_DIR", "/profile"])
+            .args(["--setenv", "HTTPS_PROXY", "http://127.0.0.1:3128"])
+            .args(["/usr/bin/bash", "-c", INSIDE, "sandbox"]);
+        command
+    }
+
+    fn bind_project(&self, command: &mut Command) {
+        if self.writable {
+            command.arg("--bind").arg(&self.project).arg("/work");
+            if self.project.join(".git").is_dir() {
+                self.lock_git(command);
+            }
+        } else {
+            command.arg("--ro-bind").arg(&self.project).arg("/work");
+        }
+    }
+
+    /// .git becomes its own mount so it can't be renamed out of the way and
+    /// replaced, and the parts of it that run code become read-only. A part
+    /// that doesn't exist yet is covered with an empty read-only tmpfs so it
+    /// can't be created either.
+    fn lock_git(&self, command: &mut Command) {
+        command.arg("--bind").arg(self.project.join(".git")).arg("/work/.git");
+
+        for part in GIT_PARTS_THAT_RUN_CODE {
+            let outside = self.project.join(part);
+            let inside = Path::new("/work").join(part);
+            if outside.exists() {
+                command.arg("--ro-bind").arg(outside).arg(inside);
+            } else {
+                command.arg("--tmpfs").arg(&inside).arg("--remount-ro").arg(&inside);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn arguments_of(sandbox: &Sandbox) -> Vec<String> {
+        sandbox
+            .claude(Path::new("/bin/claude"))
+            .get_args()
+            .map(|it| it.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn binds<'a>(arguments: &'a [String], flag: &str) -> Vec<(&'a str, &'a str)> {
+        arguments
+            .windows(3)
+            .filter(|it| it[0] == flag)
+            .map(|it| (it[1].as_str(), it[2].as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn a_hand_can_write_its_project_but_not_the_parts_of_git_that_run_code() {
+        let project = std::env::temp_dir().join(format!("anna-sandbox-{}", std::process::id()));
+        fs::create_dir_all(project.join(".git/hooks")).unwrap();
+        fs::write(project.join(".git/config"), "").unwrap();
+        let project_path = project.to_str().unwrap();
+
+        let arguments = arguments_of(&Sandbox {
+            project: project.clone(),
+            profile: PathBuf::from("/data/hands/h1/profile"),
+            proxy_socket: PathBuf::from("/run/anna/proxy.sock"),
+            broker_socket: None,
+            writable: true,
+        });
+
+        assert!(arguments.contains(&"--unshare-all".to_string()));
+        let git = format!("{project_path}/.git");
+        assert_eq!(
+            binds(&arguments, "--bind"),
+            [(project_path, "/work"), (git.as_str(), "/work/.git"), ("/data/hands/h1/profile", "/profile")]
+        );
+        let read_only = binds(&arguments, "--ro-bind");
+        assert!(read_only.contains(&(format!("{git}/config").as_str(), "/work/.git/config")));
+        assert!(read_only.contains(&(format!("{git}/hooks").as_str(), "/work/.git/hooks")));
+        assert!(arguments.windows(2).any(|it| it[0] == "--remount-ro" && it[1] == "/work/.git/modules"));
+        assert!(!arguments.iter().any(|it| it == "/home" || it == "/etc"));
+        assert!(!arguments.iter().any(|it| it == BROKER_INSIDE));
+
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn a_reviewer_can_write_nothing_in_the_project() {
+        let arguments = arguments_of(&Sandbox {
+            project: PathBuf::from("/home/someone/project"),
+            profile: PathBuf::from("/data/reviews/r1/profile"),
+            proxy_socket: PathBuf::from("/run/anna/proxy.sock"),
+            broker_socket: Some(PathBuf::from("/run/anna/hand-h1.sock")),
+            writable: false,
+        });
+
+        assert_eq!(binds(&arguments, "--bind"), [("/data/reviews/r1/profile", "/profile")]);
+        assert!(binds(&arguments, "--ro-bind").contains(&("/home/someone/project", "/work")));
+        assert!(binds(&arguments, "--ro-bind").contains(&("/run/anna/hand-h1.sock", BROKER_INSIDE)));
+    }
+}

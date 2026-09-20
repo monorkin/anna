@@ -1,35 +1,21 @@
-//! A hand: one throw-away Claude Code session in a sandbox.
+//! A hand: one throw-away Claude Code session, sandboxed into one project.
 //!
-//! The sandbox is bubblewrap with every namespace unshared. The hand sees a
-//! read-only /usr, its project folder at /work, its own profile, and the
-//! proxy's socket — no home directory, no network. socat turns the socket
-//! into the localhost proxy Claude Code is pointed at, so the Claude API is
-//! the only thing the hand can reach. Permissions are skipped inside, because
-//! the sandbox is the permission system.
-//!
-//! Clean-up rounds resume the same session in the same sandbox. Discarding
-//! the hand deletes its profile and everything else it had, except the
-//! project folder it worked in.
+//! It can write its project folder and call the tools it was granted, and
+//! that is all. Clean-up rounds resume the same session in the same sandbox.
+//! Discarding the hand deletes its profile and everything else it had, except
+//! what it did to the project.
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::broker::{self, Endpoint, Tool};
 use crate::claude;
 use crate::clock;
 use crate::logs;
 use crate::paths;
-
-const INSIDE: &str = r#"
-socat TCP-LISTEN:3128,fork,bind=127.0.0.1 UNIX-CONNECT:/run/proxy.sock &
-sleep 0.3
-exec /opt/claude "$@"
-"#;
-
-const BROKER_INSIDE: &str = "/run/broker.sock";
+use crate::sandbox::{self, Sandbox};
 
 pub struct Hand {
     id: String,
@@ -37,6 +23,8 @@ pub struct Hand {
     directory: PathBuf,
     session: Option<String>,
     granted: Option<Endpoint>,
+    asked: Vec<String>,
+    rejections: u32,
 }
 
 impl Hand {
@@ -69,6 +57,8 @@ impl Hand {
             directory,
             session: None,
             granted,
+            asked: Vec::new(),
+            rejections: 0,
         })
     }
 
@@ -76,11 +66,35 @@ impl Hand {
         &self.id
     }
 
+    pub fn project(&self) -> &Path {
+        &self.project
+    }
+
+    /// Everything this hand has been asked so far: the brief, then each
+    /// round of notes it was sent back with.
+    pub fn asked(&self) -> String {
+        self.asked.join("\n\nSent back with these notes:\n")
+    }
+
+    pub fn count_rejection(&mut self) -> u32 {
+        self.rejections += 1;
+        self.rejections
+    }
+
     pub fn work(&mut self, brief: &str, proxy_socket: &Path) -> Result<String> {
-        let mut command = self.sandbox(proxy_socket, &claude::binary()?);
+        self.asked.push(brief.to_string());
+        let sandbox = Sandbox {
+            project: self.project.clone(),
+            profile: self.directory.join("profile"),
+            proxy_socket: proxy_socket.to_path_buf(),
+            broker_socket: self.granted.as_ref().map(|it| it.socket().to_path_buf()),
+            writable: true,
+        };
+
+        let mut command = sandbox.claude(&claude::binary()?);
         command.args(["-p", brief, "--dangerously-skip-permissions", "--strict-mcp-config"]);
         if self.granted.is_some() {
-            command.args(["--mcp-config", &broker::mcp_config(Path::new(BROKER_INSIDE))]);
+            command.args(["--mcp-config", &broker::mcp_config(Path::new(sandbox::BROKER_INSIDE))]);
         }
         if let Some(session) = &self.session {
             command.args(["--resume", session]);
@@ -95,81 +109,5 @@ impl Hand {
     pub fn discard(self) {
         let _ = fs::remove_dir_all(&self.directory);
         logs::event("hand.discarded", json!({ "hand": self.id }));
-    }
-
-    fn sandbox(&self, proxy_socket: &Path, claude_binary: &Path) -> Command {
-        let mut command = Command::new("bwrap");
-        command
-            .args(["--unshare-all", "--die-with-parent"])
-            .args(["--ro-bind", "/usr", "/usr"])
-            .args(["--symlink", "usr/bin", "/bin"])
-            .args(["--symlink", "usr/lib", "/lib"])
-            .args(["--symlink", "usr/lib", "/lib64"])
-            .args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/home/hand"]);
-
-        for certificates in ["/etc/ssl", "/etc/ca-certificates", "/etc/pki"] {
-            if Path::new(certificates).exists() {
-                command.args(["--ro-bind", certificates, certificates]);
-            }
-        }
-
-        command
-            .arg("--ro-bind")
-            .arg(claude_binary)
-            .arg("/opt/claude")
-            .arg("--bind")
-            .arg(&self.project)
-            .arg("/work")
-            .arg("--bind")
-            .arg(self.directory.join("profile"))
-            .arg("/profile")
-            .arg("--ro-bind")
-            .arg(proxy_socket)
-            .arg("/run/proxy.sock");
-        if let Some(endpoint) = &self.granted {
-            command.arg("--ro-bind").arg(endpoint.socket()).arg(BROKER_INSIDE);
-        }
-
-        command
-            .args(["--chdir", "/work"])
-            .args(["--setenv", "HOME", "/home/hand"])
-            .args(["--setenv", "PATH", "/usr/bin"])
-            .args(["--setenv", "CLAUDE_CONFIG_DIR", "/profile"])
-            .args(["--setenv", "HTTPS_PROXY", "http://127.0.0.1:3128"])
-            .args(["/usr/bin/bash", "-c", INSIDE, "hand"]);
-        command
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_sandbox_shares_only_the_project_the_profile_and_the_proxy() {
-        let hand = Hand {
-            id: "h1".to_string(),
-            project: PathBuf::from("/home/someone/project"),
-            directory: PathBuf::from("/data/hands/h1"),
-            session: None,
-            granted: None,
-        };
-
-        let command = hand.sandbox(Path::new("/run/anna/proxy.sock"), Path::new("/bin/claude"));
-        let arguments: Vec<String> = command
-            .get_args()
-            .map(|it| it.to_string_lossy().into_owned())
-            .collect();
-        let writable: Vec<&[String]> = arguments.windows(3).filter(|it| it[0] == "--bind").collect();
-
-        assert!(arguments.contains(&"--unshare-all".to_string()));
-        assert_eq!(
-            writable,
-            [
-                ["--bind", "/home/someone/project", "/work"].map(String::from).as_slice(),
-                ["--bind", "/data/hands/h1/profile", "/profile"].map(String::from).as_slice(),
-            ]
-        );
-        assert!(!arguments.iter().any(|it| it == "/home" || it == "/etc"));
     }
 }

@@ -24,14 +24,15 @@ use crate::logs;
 use crate::mcp::Catalog;
 use crate::paths;
 use crate::proxy::{self, Proxy};
-use crate::thread_tools::{Dismiss, Hands, Reply, SendBack, StartHand};
+use crate::thread_tools::{Dismiss, Hands, Reply, SendBack, StartHand, Workshop};
 
 const TOOL_TIMEOUT_MILLISECONDS: &str = "7200000";
 
 const ROLE: &str = "You are Anna, working as a colleague rather than a tool. \
 Someone is talking to you in a conversation; the reply tool is the only way they hear from you, so use it for every answer, question, and update. \
 You plan and check; hands do the work inside projects. Give a hand one project folder and a brief that carries everything it needs, because it knows nothing you know. \
-Read what it did before you accept it, and send it back with specific notes when it isn't right. Dismiss a hand when you're done with it. \
+A reviewer checks every hand's work against your brief and tells you what was actually done; send the hand back with the reviewer's notes when the work isn't right, and dismiss it when you're done with it. \
+You are not sandboxed and hands are, so never run code, scripts, tests or build tools from a folder a hand has worked in — have a hand do it. Reading files there is fine. \
 When something can't be done, say what you tried and what you can do instead.";
 
 pub fn wake(conversation: Arc<dyn Conversation>, message: &str) -> Result<()> {
@@ -42,15 +43,20 @@ pub fn wake(conversation: Arc<dyn Conversation>, message: &str) -> Result<()> {
     let config = Config::load()?;
     let judge = Arc::new(Judge::from(&config));
     let editor = Arc::new(Editor::new(config::style(), judge.clone()));
-    let catalog = Arc::new(Catalog::open(&config, editor.clone(), judge));
+    let catalog = Arc::new(Catalog::open(&config, editor.clone(), judge.clone()));
     let proxy = Proxy::start(&paths::socket(&format!("proxy-{key}")), &[proxy::CLAUDE_API])?;
     let hands = Arc::new(Hands::default());
+    let workshop = Arc::new(Workshop {
+        hands: hands.clone(),
+        judge,
+        proxy_socket: proxy.socket().to_path_buf(),
+    });
     let spoke = Arc::new(AtomicBool::new(false));
 
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(Reply { conversation: conversation.clone(), editor: editor.clone(), spoke: spoke.clone() }),
-        Box::new(StartHand { hands: hands.clone(), catalog: catalog.clone(), proxy_socket: proxy.socket().to_path_buf() }),
-        Box::new(SendBack { hands: hands.clone(), proxy_socket: proxy.socket().to_path_buf() }),
+        Box::new(StartHand { workshop: workshop.clone(), catalog: catalog.clone() }),
+        Box::new(SendBack { workshop }),
         Box::new(Dismiss { hands: hands.clone() }),
     ];
     tools.extend(catalog.all());
