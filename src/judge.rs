@@ -13,8 +13,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::claude;
-use crate::config::Config;
+use crate::config;
 use crate::logs;
+use crate::secrets;
 
 const JEV_URL: &str = "https://api.typesafe.ai/v1/systemone";
 
@@ -28,9 +29,9 @@ pub enum Judge {
 }
 
 impl Judge {
-    pub fn from(config: &Config) -> Judge {
-        match &config.jev_api_key {
-            Some(api_key) => Judge::Jev { api_key: api_key.clone() },
+    pub fn with_whatever_is_set_up() -> Judge {
+        match secrets::load(config::JEV_API_KEY) {
+            Some(api_key) => Judge::Jev { api_key },
             None => Judge::Haiku,
         }
     }

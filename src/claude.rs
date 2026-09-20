@@ -96,19 +96,34 @@ pub fn reply_of(command: &mut Command, limit: Duration) -> Result<Reply> {
 /// first — once the root dies its children are re-parented and can't be
 /// found any more — and then all of it is killed.
 fn stop_with_everything_it_started(root: libc::pid_t) {
-    let mut doomed = vec![root];
+    let mut doomed = everything_started_by(root);
+    doomed.push(root);
+    kill(&doomed);
+}
+
+/// Everything below a process, leaving the process itself alone — for Anna
+/// stopping her own threads and hands on the way out.
+pub fn stop_everything_started_by(root: libc::pid_t) {
+    kill(&everything_started_by(root));
+}
+
+fn everything_started_by(root: libc::pid_t) -> Vec<libc::pid_t> {
     let parents = parents_by_process();
+    let mut family = vec![root];
 
     let mut index = 0;
-    while index < doomed.len() {
-        let parent = doomed[index];
-        doomed.extend(parents.iter().filter(|(_, its_parent)| *its_parent == parent).map(|(process, _)| *process));
+    while index < family.len() {
+        let parent = family[index];
+        family.extend(parents.iter().filter(|(_, its_parent)| *its_parent == parent).map(|(process, _)| *process));
         index += 1;
     }
+    family.split_off(1)
+}
 
-    for process in doomed {
+fn kill(processes: &[libc::pid_t]) {
+    for process in processes {
         unsafe {
-            libc::kill(process, libc::SIGKILL);
+            libc::kill(*process, libc::SIGKILL);
         }
     }
 }

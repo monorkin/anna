@@ -25,7 +25,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::broker::{self, Endpoint, Tool};
 use crate::claude::{self, OutOfTime};
-use crate::config;
 use crate::conversation::Conversation;
 use crate::logs;
 use crate::paths;
@@ -66,7 +65,7 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, message: &st
     logs::event("thread.woken", json!({ "conversation": key }));
     let session = Session::of(&directory)?;
     let memory = Supervision::begin(&directory, &key)?;
-    let mut command = turn(&directory, &endpoint, &session, message)?;
+    let mut command = turn(&directory, &endpoint, &session, &role(runtime), message)?;
     memory.cover(&mut command);
 
     let outcome = claude::reply_of(&mut command, runtime.outside.time_limit);
@@ -130,14 +129,14 @@ fn random_uuid() -> Result<String> {
     Ok(format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]))
 }
 
-fn turn(directory: &Path, endpoint: &Endpoint, session: &Session, message: &str) -> Result<Command> {
+fn turn(directory: &Path, endpoint: &Endpoint, session: &Session, role: &str, message: &str) -> Result<Command> {
     let mut command = Command::new(claude::binary()?);
     command
         .current_dir(directory)
         .env("MCP_TOOL_TIMEOUT", TOOL_TIMEOUT_MILLISECONDS)
         .args(["-p", message, "--dangerously-skip-permissions", "--strict-mcp-config"])
         .args(["--mcp-config", &broker::mcp_config(endpoint.socket())])
-        .args(["--append-system-prompt", &role()]);
+        .args(["--append-system-prompt", role]);
     if session.begun {
         command.args(["--resume", &session.id]);
     } else {
@@ -154,8 +153,8 @@ fn turn(directory: &Path, endpoint: &Endpoint, session: &Session, message: &str)
     Ok(command)
 }
 
-fn role() -> String {
-    match config::personality() {
+fn role(runtime: &Runtime) -> String {
+    match &runtime.personality {
         Some(personality) => format!("{ROLE}\n\n{personality}"),
         None => ROLE.to_string(),
     }

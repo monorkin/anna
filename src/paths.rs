@@ -23,6 +23,11 @@ pub fn program(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// What a backgrounded `anna run` prints, for when she doesn't come up.
+pub fn output_file() -> PathBuf {
+    data_dir().join("anna.out")
+}
+
 pub fn log_file() -> PathBuf {
     data_dir().join("log.jsonl")
 }
@@ -44,6 +49,44 @@ pub fn all_sessions_dir() -> PathBuf {
 
 pub fn source_dir(name: &str) -> PathBuf {
     data_dir().join("sources").join(name)
+}
+
+/// The one socket whose name doesn't carry the process id: whoever holds it
+/// is the running Anna.
+pub fn control_socket() -> PathBuf {
+    runtime_dir().join("control.sock")
+}
+
+/// Creates a folder that only its owner can enter. Sockets are only as
+/// private as the folder they sit in, and the fallback runtime folder lives
+/// under the home directory, which others can often traverse. A folder that
+/// already exists is left as it is — it may not be Anna's to change.
+pub fn make_private_dir(directory: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(directory)
+}
+
+/// Removes the sockets of processes that are gone — this one's too, when it
+/// is on its way out and says so. Every socket but the control socket ends
+/// in the id of the process that made it.
+pub fn sweep_sockets(including_own: bool) {
+    let Ok(entries) = std::fs::read_dir(runtime_dir()) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let owner = name.strip_suffix(".sock").and_then(|it| it.rsplit('-').next()).and_then(|it| it.parse::<u32>().ok());
+
+        if let Some(owner) = owner {
+            let own = owner == std::process::id();
+            let gone = !std::path::Path::new("/proc").join(owner.to_string()).exists();
+            if gone || (own && including_own) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 pub fn socket(name: &str) -> PathBuf {

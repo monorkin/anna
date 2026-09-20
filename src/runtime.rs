@@ -24,6 +24,7 @@ use crate::toolchains::Toolchains;
 
 pub struct Runtime {
     pub config: Config,
+    pub personality: Option<String>,
     pub judge: Arc<Judge>,
     pub editor: Arc<Editor>,
     pub catalog: Arc<Catalog>,
@@ -34,10 +35,12 @@ pub struct Runtime {
 impl Runtime {
     pub fn start() -> Result<Runtime> {
         sweep(&paths::all_sessions_dir());
+        paths::sweep_sockets(false);
 
         let config = Config::load()?;
-        let judge = Arc::new(Judge::from(&config));
-        let editor = Arc::new(Editor::new(config::style(), judge.clone()));
+        let judge = Arc::new(Judge::with_whatever_is_set_up());
+        let editor = Arc::new(Editor::new(config::style()?, judge.clone()));
+        let personality = config::personality()?;
         let catalog = Arc::new(Catalog::open(&config, editor.clone(), judge.clone()));
         let proxy = Proxy::start(&paths::socket("proxy"), &[proxy::CLAUDE_API])?;
         let outside = Arc::new(Outside {
@@ -48,6 +51,7 @@ impl Runtime {
 
         Ok(Runtime {
             config,
+            personality,
             judge,
             editor,
             catalog,

@@ -38,6 +38,25 @@ source:
   of their own. A thread's session id is chosen up front, so a stopped turn
   resumes; she says she ran out of time and offers to continue.
 - mise's tools inside the sandbox, so hands and reviewers can run tests.
+- The config, secured. `config.json`, `style.md` and `CLAUDE.md` sit in one
+  folder (700), written 600 through a temp file, and refused on load if anyone
+  but their owner could have written them — the config decides who Anna hears
+  and which commands she runs as MCP servers. Tokens aren't in it: the Jev key
+  goes to the keyring through `secret-tool`, or to a 600 `secrets.json` when
+  no keyring answers (`ANNA_KEYRING=off` forces the file).
+- `anna setup` as a wizard in steps: prerequisites, Claude accounts, the Jev
+  key typed without echo and checked against the API before it is kept, style,
+  CLAUDE.md, people, MCP servers, and whether to install a systemd user
+  service (with lingering, if she should run while nobody is logged in).
+- The control socket, and `anna start`, `stop`, `status`, `poke`. Start and
+  stop go through systemd when the service is installed. Stopping — by
+  command, ctrl+c or SIGTERM — kills everything below her and removes her
+  sockets. The socket is also the lock against a second Anna.
+- `anna poke` instead of waiting for the poll. MCP can't push: `hey mcp`
+  offers tools only, no resources or subscriptions. So whatever does know
+  something happened pokes her, and she reads the source herself — a poke
+  carries no message and no sender, so being able to poke isn't being able to
+  speak as someone. The timer stays as the fallback.
 - One binary. katami and ax are library crates with a thin binary each
   (`cli.rs` holds their command line), and Anna depends on both by path.
   `anna memory …` and `anna claude account …` are their own subcommands

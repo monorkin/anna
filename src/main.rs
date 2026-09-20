@@ -2,11 +2,14 @@ mod broker;
 mod claude;
 mod clock;
 mod config;
+mod control;
 mod conversation;
 mod dispatcher;
 mod editor;
+mod fsutil;
 mod hand;
 mod judge;
+mod lifecycle;
 mod logs;
 mod mcp;
 mod mcp_cli;
@@ -15,6 +18,8 @@ mod proxy;
 mod reviewer;
 mod runtime;
 mod sandbox;
+mod secrets;
+mod service;
 mod setup;
 mod source;
 mod thread;
@@ -40,7 +45,15 @@ struct Cli {
 enum Command {
     /// Walk through the one-time setup; safe to run again
     Setup,
-    /// Start Anna: listen on every source until stopped
+    /// Bring Anna up in the background, through systemd when the service is installed
+    Start,
+    /// Stop Anna and everything she started
+    Stop,
+    /// Show whether Anna is running and what she's listening on
+    Status,
+    /// Have Anna check a source now instead of at the next tick; all of them when none is named
+    Poke { source: Option<String> },
+    /// Run Anna in this terminal: listen on every source until stopped
     Run,
     /// Talk to Anna from this terminal
     Chat {
@@ -126,6 +139,10 @@ const KATAMI_RUNS_ITSELF_AS: [&str; 3] = ["hook", "review", "curate"];
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Setup => setup::run(),
+        Command::Start => lifecycle::start(),
+        Command::Stop => lifecycle::stop(),
+        Command::Status => lifecycle::status(),
+        Command::Poke { source } => lifecycle::poke(source.as_deref()),
         Command::Run => dispatcher::run(),
         Command::Chat { message, conversation } => {
             thread::wake(&Runtime::start()?, Arc::new(Terminal::new(&conversation)), &message)

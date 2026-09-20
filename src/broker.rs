@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::logs;
+use crate::paths;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -36,7 +37,7 @@ pub struct Endpoint {
 impl Endpoint {
     pub fn open(socket: &Path, tools: Vec<Box<dyn Tool>>) -> Result<Endpoint> {
         if let Some(directory) = socket.parent() {
-            fs::create_dir_all(directory)?;
+            paths::make_private_dir(directory)?;
         }
         let _ = fs::remove_file(socket);
         let listener = UnixListener::bind(socket)

@@ -1,23 +1,26 @@
 //! What `anna setup` writes and everything else reads.
 //!
-//! The settings are one JSON file. The two pieces of prose — the style Anna
-//! writes in and her personality — are their own markdown files next to it,
-//! because nobody should have to edit prose inside a JSON string. All of it
-//! is optional: without a Jev key the judge falls back to haiku, without a
-//! style nothing is restyled, without a personality she has none.
+//! The settings are one JSON file, `config.json`. The two pieces of prose
+//! live next to it as markdown, because nobody should have to edit prose
+//! inside a JSON string: `style.md` is how Anna writes to people, and
+//! `CLAUDE.md` is who she is — every thread reads it. Tokens are not here at
+//! all; see `secrets`.
+//!
+//! All three files steer Anna, so they are written private and refused if
+//! anyone but their owner could have written them.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 
+use crate::fsutil;
 use crate::paths;
+
+pub const JEV_API_KEY: &str = "jev_api_key";
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Config {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jev_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp_servers: BTreeMap<String, McpServer>,
     /// Where people talk to Anna, by name.
@@ -51,7 +54,6 @@ fn is_yes(value: &bool) -> bool {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            jev_api_key: None,
             mcp_servers: BTreeMap::new(),
             sources: BTreeMap::new(),
             people: BTreeMap::new(),
@@ -118,7 +120,7 @@ impl Config {
 
     fn load_from(path: &Path) -> Result<Config> {
         if path.exists() {
-            let text = fs::read_to_string(path)?;
+            let text = fsutil::read_trusted(path)?;
             serde_json::from_str(&text).with_context(|| format!("{} is not valid", path.display()))
         } else {
             Ok(Config::default())
@@ -126,27 +128,31 @@ impl Config {
     }
 
     fn save_to(&self, path: &Path) -> Result<()> {
-        if let Some(directory) = path.parent() {
-            fs::create_dir_all(directory)?;
-        }
-        fs::write(path, serde_json::to_string_pretty(self)? + "\n")?;
-        Ok(())
+        fsutil::write_private(path, &(serde_json::to_string_pretty(self)? + "\n"))
     }
 }
 
-pub fn style() -> Option<String> {
+pub fn style() -> Result<Option<String>> {
     prose(&paths::config_dir().join("style.md"))
 }
 
-pub fn personality() -> Option<String> {
-    prose(&paths::config_dir().join("personality.md"))
+pub fn personality() -> Result<Option<String>> {
+    prose(&paths::config_dir().join("CLAUDE.md"))
 }
 
-fn prose(path: &Path) -> Option<String> {
-    fs::read_to_string(path)
-        .ok()
-        .map(|it| it.trim().to_string())
-        .filter(|it| !it.is_empty())
+/// A missing or empty file means there is none. A file someone else could
+/// have written is an error, never a quiet "none".
+fn prose(path: &Path) -> Result<Option<String>> {
+    if path.exists() {
+        let text = fsutil::read_trusted(path)?.trim().to_string();
+        if text.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(text))
+        }
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -172,11 +178,13 @@ mod tests {
         config.save_to(&path).unwrap();
 
         assert_eq!(Config::load_from(&path).unwrap(), config);
-        assert!(!fs::read_to_string(&path).unwrap().contains("jev_api_key"));
-        assert_eq!(prose(&directory.join("style.md")), None);
+        assert_eq!(prose(&directory.join("style.md")).unwrap(), None);
 
-        fs::write(directory.join("style.md"), "  Short sentences.\n\n").unwrap();
-        assert_eq!(prose(&directory.join("style.md")), Some("Short sentences.".to_string()));
-        fs::remove_dir_all(directory).unwrap();
+        fsutil::write_private(&directory.join("style.md"), "  Short sentences.\n\n").unwrap();
+        assert_eq!(prose(&directory.join("style.md")).unwrap(), Some("Short sentences.".to_string()));
+
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o666)).unwrap();
+        assert!(Config::load_from(&path).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

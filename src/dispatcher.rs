@@ -10,17 +10,23 @@
 //! One thread per conversation, never two turns of the same thread at once;
 //! different conversations run side by side.
 
-use anyhow::{Result, bail};
-use serde_json::json;
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread as os_thread;
 use std::time::Duration;
 
+use crate::claude;
+use crate::clock;
 use crate::config::Source;
+use crate::control::{self, Controls};
 use crate::conversation::Conversation;
 use crate::judge::{MANIPULATION_QUESTION, SUSPICIOUS};
 use crate::logs;
+use crate::paths;
 use crate::runtime::Runtime;
 use crate::source::{self, Message, Seen, Sourced};
 use crate::thread;
@@ -50,27 +56,106 @@ pub fn run() -> Result<()> {
         bail!("there are no sources to listen on yet; `anna chat` works without them");
     }
 
+    let turns = Arc::new(Turns::default());
+    let mut pokes = HashMap::new();
+    let mut listeners = Vec::new();
+    for (name, source) in runtime.config.sources.clone() {
+        let (poke, poked) = mpsc::channel();
+        pokes.insert(name.clone(), poke);
+
+        let runtime = runtime.clone();
+        let turns = turns.clone();
+        listeners.push(os_thread::spawn(move || listen(&runtime, &turns, &name, &source, &poked)));
+    }
+
+    control::serve(Arc::new(Running {
+        since: clock::timestamp(),
+        pokes: Mutex::new(pokes),
+        turns: turns.clone(),
+    }))?;
+    stop_on_signals();
     if runtime.config.rotate_accounts {
         rotate_accounts();
     }
-    let turns = Arc::new(Turns::default());
-    let listeners: Vec<_> = runtime
-        .config
-        .sources
-        .clone()
-        .into_iter()
-        .map(|(name, source)| {
-            let runtime = runtime.clone();
-            let turns = turns.clone();
-            os_thread::spawn(move || listen(&runtime, &turns, &name, &source))
-        })
-        .collect();
 
     logs::event("anna.listening", json!({ "sources": runtime.config.sources.keys().collect::<Vec<_>>() }));
     for listener in listeners {
         let _ = listener.join();
     }
     Ok(())
+}
+
+/// What the control socket can ask of a running Anna.
+struct Running {
+    since: String,
+    pokes: Mutex<HashMap<String, Sender<()>>>,
+    turns: Arc<Turns>,
+}
+
+impl Controls for Running {
+    fn status(&self) -> Value {
+        json!({
+            "since": self.since,
+            "process": std::process::id(),
+            "sources": self.pokes.lock().unwrap().keys().collect::<Vec<_>>(),
+            "conversations": self.turns.by_conversation.lock().unwrap().len(),
+        })
+    }
+
+    fn poke(&self, source: Option<&str>) -> Result<String> {
+        let pokes = self.pokes.lock().unwrap();
+        match source {
+            Some(name) => {
+                let poke = pokes.get(name).with_context(|| format!("there is no source called {name}"))?;
+                let _ = poke.send(());
+                Ok(format!("Checking {name}."))
+            }
+            None => {
+                for poke in pokes.values() {
+                    let _ = poke.send(());
+                }
+                Ok("Checking every source.".to_string())
+            }
+        }
+    }
+
+    fn stop(&self) {
+        stop();
+    }
+}
+
+/// Stopping takes everything Anna started with her: threads, hands,
+/// reviewers, and whatever those started. SIGINT and SIGTERM end the same
+/// way, so ctrl+c, `anna stop` and `systemctl stop` all leave nothing behind.
+fn stop() -> ! {
+    logs::event("anna.stopping", json!({}));
+    claude::stop_everything_started_by(std::process::id() as libc::pid_t);
+    control::forget_socket();
+    paths::sweep_sockets(true);
+    std::process::exit(0);
+}
+
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn request_stop(_signal: libc::c_int) {
+    STOP_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+/// A signal handler may do almost nothing, so it only raises a flag; a
+/// thread notices it and does the stopping.
+fn stop_on_signals() {
+    unsafe {
+        libc::signal(libc::SIGINT, request_stop as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, request_stop as *const () as libc::sighandler_t);
+    }
+    os_thread::spawn(|| {
+        loop {
+            if STOP_REQUESTED.load(Ordering::Relaxed) {
+                stop();
+            }
+            os_thread::sleep(Duration::from_millis(200));
+        }
+    });
 }
 
 /// ax's auto-switch for as long as Anna runs. Threads run as the default
@@ -94,13 +179,16 @@ fn rotate_accounts() {
     });
 }
 
-fn listen(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Source) {
+/// Checks the source whenever it is poked, and on a timer for everything
+/// nobody pokes her about.
+fn listen(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Source, poked: &Receiver<()>) {
     let mut seen = Seen::load(name);
     loop {
         if let Err(error) = check(runtime, turns, name, source, &mut seen) {
             logs::event("source.failed", json!({ "source": name, "error": format!("{error:#}") }));
         }
-        os_thread::sleep(Duration::from_secs(source.every_seconds));
+        let _ = poked.recv_timeout(Duration::from_secs(source.every_seconds));
+        while poked.try_recv().is_ok() {}
     }
 }
 

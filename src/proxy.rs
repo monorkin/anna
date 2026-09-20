@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::logs;
+use crate::paths;
 
 pub const CLAUDE_API: &str = "api.anthropic.com:443";
 
@@ -25,7 +26,7 @@ pub struct Proxy {
 impl Proxy {
     pub fn start(socket: &Path, allowed: &[&str]) -> Result<Proxy> {
         if let Some(directory) = socket.parent() {
-            fs::create_dir_all(directory)?;
+            paths::make_private_dir(directory)?;
         }
         let _ = fs::remove_file(socket);
         let listener = UnixListener::bind(socket)

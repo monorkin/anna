@@ -36,7 +36,11 @@ anna setup
 
 ```bash
 # Running
-anna run                                  # starts anna: she listens on her sources until stopped
+anna start                                # bring her up in the background (through systemd, if setup installed the service)
+anna stop                                 # stop her and everything she started
+anna status
+anna poke basecamp                        # check a source now instead of at the next tick; hook this to webhooks, mail filters, cron
+anna run                                  # or run her in this terminal until ctrl+c
 anna chat "the deploy is red, have a look" # or talk to her from this terminal
 anna chat --conversation billing "..."    # each conversation is its own thread
 anna log -f                               # watch what she's doing
