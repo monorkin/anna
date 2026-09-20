@@ -13,6 +13,11 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use crate::paths;
 
@@ -31,11 +36,47 @@ pub fn binary() -> Result<PathBuf> {
         .context("could not resolve the claude binary")
 }
 
-pub fn reply_of(command: &mut Command) -> Result<Reply> {
-    let output = command
+/// A run that was stopped because it used up the time it is allowed. This is
+/// the one hard stop Anna has, so callers can tell it from things going wrong.
+#[derive(Debug)]
+pub struct OutOfTime {
+    pub minutes: u64,
+}
+
+impl std::fmt::Display for OutOfTime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "stopped after the {} minutes a single run is allowed", self.minutes)
+    }
+}
+
+impl std::error::Error for OutOfTime {}
+
+pub fn reply_of(command: &mut Command, limit: Duration) -> Result<Reply> {
+    let child = command
         .args(["--output-format", "json"])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("could not run claude")?;
+
+    let ran_out = Arc::new(AtomicBool::new(false));
+    let (finished, watchdog) = mpsc::channel::<()>();
+    let process = child.id() as libc::pid_t;
+    let flag = ran_out.clone();
+    thread::spawn(move || {
+        if watchdog.recv_timeout(limit).is_err() {
+            flag.store(true, Ordering::Relaxed);
+            stop_with_everything_it_started(process);
+        }
+    });
+
+    let output = child.wait_with_output().context("could not wait for claude")?;
+    let _ = finished.send(());
+    if ran_out.load(Ordering::Relaxed) {
+        return Err(OutOfTime { minutes: limit.as_secs() / 60 }.into());
+    }
+
     let reply: Reply = serde_json::from_slice(&output.stdout).with_context(|| {
         format!(
             "claude exited with {} and no readable reply: {}",
@@ -48,6 +89,50 @@ pub fn reply_of(command: &mut Command) -> Result<Reply> {
         bail!("claude reported an error: {}", reply.result);
     }
     Ok(reply)
+}
+
+/// Claude Code runs shell commands in sessions of their own, so neither the
+/// process nor its group reaches them. The whole tree is read off /proc
+/// first — once the root dies its children are re-parented and can't be
+/// found any more — and then all of it is killed.
+fn stop_with_everything_it_started(root: libc::pid_t) {
+    let mut doomed = vec![root];
+    let parents = parents_by_process();
+
+    let mut index = 0;
+    while index < doomed.len() {
+        let parent = doomed[index];
+        doomed.extend(parents.iter().filter(|(_, its_parent)| *its_parent == parent).map(|(process, _)| *process));
+        index += 1;
+    }
+
+    for process in doomed {
+        unsafe {
+            libc::kill(process, libc::SIGKILL);
+        }
+    }
+}
+
+fn parents_by_process() -> Vec<(libc::pid_t, libc::pid_t)> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let process: libc::pid_t = entry.file_name().to_str()?.parse().ok()?;
+            let stat = fs::read_to_string(entry.path().join("stat")).ok()?;
+            Some((process, parent_in(&stat)?))
+        })
+        .collect()
+}
+
+/// The parent is the second field after the command name, and the command
+/// name is in parentheses and may itself contain spaces and parentheses.
+fn parent_in(stat: &str) -> Option<libc::pid_t> {
+    let after_name = &stat[stat.rfind(')')? + 1..];
+    after_name.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// One question to haiku about a text, with the text on stdin where it reads
@@ -113,6 +198,34 @@ fn write_private(path: &Path, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn still_running(marker: &str) -> bool {
+        fs::read_dir("/proc")
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| fs::read(entry.path().join("cmdline")).ok())
+            .any(|command_line| String::from_utf8_lossy(&command_line).contains(marker))
+    }
+
+    #[test]
+    fn a_run_is_stopped_when_its_time_is_up() {
+        let mut quick = Command::new("sh");
+        quick.args(["-c", r#"echo '{"result":"done","session_id":"s1"}'"#]);
+        assert_eq!(reply_of(&mut quick, Duration::from_secs(10)).unwrap().result, "done");
+
+        let mut endless = Command::new("sh");
+        endless.args(["-c", "setsid sleep 31.4159 & wait"]);
+        let error = reply_of(&mut endless, Duration::from_millis(300)).unwrap_err();
+        assert!(error.downcast_ref::<OutOfTime>().is_some());
+        thread::sleep(Duration::from_millis(100));
+        assert!(!still_running("31.4159"), "a command in its own session outlived the stop");
+
+        assert_eq!(parent_in("4242 (tmux: server (1)) S 17 4242 4242 0 -1"), Some(17));
+
+        let mut failing = Command::new("sh");
+        failing.args(["-c", r#"echo '{"result":"no quota","session_id":"s2","is_error":true}'"#]);
+        assert!(reply_of(&mut failing, Duration::from_secs(10)).unwrap_err().to_string().contains("no quota"));
+    }
 
     #[test]
     fn a_hand_never_gets_the_refresh_token() {

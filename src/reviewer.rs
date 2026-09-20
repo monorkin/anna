@@ -43,7 +43,7 @@ pub fn review(project: &Path, brief: &str, report: &str, outside: &Outside) -> R
     let mut command = sandbox.claude(&claude::binary()?);
     command.args(["-p", &prompt(brief, report), "--dangerously-skip-permissions", "--strict-mcp-config"]);
 
-    let outcome = claude::reply_of(&mut command);
+    let outcome = claude::reply_of(&mut command, outside.time_limit);
     let _ = fs::remove_dir_all(&directory);
 
     let verdict = verdict_in(&outcome?.result)?;

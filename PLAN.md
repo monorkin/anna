@@ -32,20 +32,28 @@ source:
   reply, one turn at a time per conversation.
 - `anna setup`, `anna log -f`, cleanup of profiles left by dead processes,
   threads that die with Anna.
+- The hard stop — `minutes_per_run` (60 by default) for every thread turn,
+  hand and reviewer. A run that goes over is killed along with everything it
+  started, read off /proc because Claude Code puts shell commands in sessions
+  of their own. A thread's session id is chosen up front, so a stopped turn
+  resumes; she says she ran out of time and offers to continue.
+- mise's tools inside the sandbox, so hands and reviewers can run tests.
 
 Not built, or not working yet:
 
-- **Memory.** Threads launch through `katami claude` when katami is installed,
-  but katami only supervises when it has a terminal, so headless threads get
-  no memory today. katami needs to supervise over pipes. After that: `origin`
-  and speaker in katami, then the hand-transcript pipeline with the Jev risk
-  score.
+- **Memory.** katami only supervises when it has a terminal
+  (`launch.rs`, `supervise_or_pipe`), so a headless thread launched through it
+  gets no memory, and the extra process in between made threads harder to
+  stop. Threads run plain `claude` until katami can supervise over pipes.
+  After that: `origin` and speaker in katami, then the hand-transcript
+  pipeline with the Jev risk score.
 - **Accounts.** `anna run` starts `ax auto-switch` next to itself, which
   covers threads and every new hand. Not run live, because it moves the real
   default login. Still missing: moving a long-running hand mid-session.
 - **One binary.** katami and ax are used as installed commands for now.
-- **The config as a ceiling.** `people` decides who is heard. Who may ask for
-  what, the widest grant, and the per-task budget don't exist yet.
+- **The config as a ceiling.** `people` decides who is heard and
+  `minutes_per_run` is the budget. Who may ask for what, and the widest grant
+  a hand can get, don't exist yet — that needs your call on the shape.
 - **Real sources.** Anna has no account of her own anywhere, so no source has
   been configured against a real server.
 - **Dependencies and Rust in the sandbox.** mise's tools are there now: its

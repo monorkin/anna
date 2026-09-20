@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use crate::toolchains::Toolchains;
 
@@ -31,6 +32,7 @@ const GIT_PARTS_THAT_RUN_CODE: [&str; 3] = [".git/config", ".git/hooks", ".git/m
 pub struct Outside {
     pub proxy_socket: PathBuf,
     pub toolchains: Toolchains,
+    pub time_limit: Duration,
 }
 
 pub struct Sandbox<'outside> {
@@ -149,6 +151,7 @@ mod tests {
         let outside = Outside {
             proxy_socket: PathBuf::from("/run/anna/proxy.sock"),
             toolchains: Toolchains::default(),
+            time_limit: Duration::from_secs(60),
         };
         let arguments = arguments_of(&Sandbox {
             project: project.clone(),
@@ -183,6 +186,7 @@ mod tests {
                 installs: Some(installs.clone()),
                 bins: vec![installs.join("ruby/3.4.7/bin")],
             },
+            time_limit: Duration::from_secs(60),
         };
         let arguments = arguments_of(&Sandbox {
             project: PathBuf::from("/home/someone/project"),

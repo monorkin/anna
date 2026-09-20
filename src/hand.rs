@@ -100,7 +100,7 @@ impl Hand {
             command.args(["--resume", session]);
         }
 
-        let reply = claude::reply_of(&mut command)?;
+        let reply = claude::reply_of(&mut command, outside.time_limit)?;
         logs::event("hand.reported", json!({ "hand": self.id, "session": reply.session_id }));
         self.session = Some(reply.session_id);
         Ok(reply.result)

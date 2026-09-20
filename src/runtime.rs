@@ -10,6 +10,7 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::config::{self, Config};
 use crate::editor::Editor;
@@ -42,6 +43,7 @@ impl Runtime {
         let outside = Arc::new(Outside {
             proxy_socket: proxy.socket().to_path_buf(),
             toolchains: Toolchains::discover(),
+            time_limit: Duration::from_secs(config.minutes_per_run * 60),
         });
 
         Ok(Runtime {

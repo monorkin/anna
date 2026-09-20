@@ -6,17 +6,18 @@
 //! and if a turn ends without it having said anything, its closing words are
 //! said for it rather than lost.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::json;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::broker::{self, Endpoint, Tool};
-use crate::claude;
+use crate::claude::{self, OutOfTime};
 use crate::config;
 use crate::conversation::Conversation;
 use crate::logs;
@@ -56,28 +57,79 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, message: &st
     let endpoint = Endpoint::open(&paths::socket(&format!("thread-{key}")), tools)?;
 
     logs::event("thread.woken", json!({ "conversation": key }));
-    let outcome = claude::reply_of(&mut turn(&directory, &endpoint, message)?);
+    let session = Session::of(&directory)?;
+    let outcome = claude::reply_of(&mut turn(&directory, &endpoint, &session, message)?, runtime.outside.time_limit);
     hands.discard_all();
 
-    let reply = outcome.with_context(|| format!("the thread for {key} could not finish its turn"))?;
-    fs::write(directory.join("session"), &reply.session_id)?;
-    if !spoke.load(Ordering::Relaxed) {
-        conversation.say(&runtime.editor.polish(&reply.result)?)?;
+    match outcome {
+        Ok(reply) => {
+            session.keep()?;
+            if !spoke.load(Ordering::Relaxed) {
+                conversation.say(&runtime.editor.polish(&reply.result)?)?;
+            }
+            logs::event("thread.slept", json!({ "conversation": key, "session": reply.session_id }));
+            Ok(())
+        }
+        Err(error) => match error.downcast_ref::<OutOfTime>() {
+            Some(out_of_time) => {
+                session.keep()?;
+                logs::event("thread.out_of_time", json!({ "conversation": key, "minutes": out_of_time.minutes }));
+                conversation.say(&format!(
+                    "I ran out of time on this. One go at something gets {} min, and that's used up. Tell me to keep going and I'll pick up where I stopped.",
+                    out_of_time.minutes
+                ))
+            }
+            None => Err(error.context(format!("the thread for {key} could not finish its turn"))),
+        },
     }
-    logs::event("thread.slept", json!({ "conversation": key, "session": reply.session_id }));
-    Ok(())
 }
 
-fn turn(directory: &Path, endpoint: &Endpoint, message: &str) -> Result<Command> {
-    let mut command = remembering_claude()?;
+/// The Claude session behind a thread. Its id is chosen before the first
+/// turn, not learned from it, so a turn that was cut short can still be
+/// picked up again.
+struct Session {
+    id: String,
+    file: PathBuf,
+    begun: bool,
+}
+
+impl Session {
+    fn of(directory: &Path) -> Result<Session> {
+        let file = directory.join("session");
+        match fs::read_to_string(&file) {
+            Ok(id) => Ok(Session { id: id.trim().to_string(), file, begun: true }),
+            Err(_) => Ok(Session { id: random_uuid()?, file, begun: false }),
+        }
+    }
+
+    fn keep(&self) -> Result<()> {
+        fs::write(&self.file, &self.id)?;
+        Ok(())
+    }
+}
+
+fn random_uuid() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    let hex: String = bytes.iter().map(|it| format!("{it:02x}")).collect();
+    Ok(format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]))
+}
+
+fn turn(directory: &Path, endpoint: &Endpoint, session: &Session, message: &str) -> Result<Command> {
+    let mut command = Command::new(claude::binary()?);
     command
         .current_dir(directory)
         .env("MCP_TOOL_TIMEOUT", TOOL_TIMEOUT_MILLISECONDS)
         .args(["-p", message, "--dangerously-skip-permissions", "--strict-mcp-config"])
         .args(["--mcp-config", &broker::mcp_config(endpoint.socket())])
         .args(["--append-system-prompt", &role()]);
-    if let Ok(session) = fs::read_to_string(directory.join("session")) {
-        command.args(["--resume", session.trim()]);
+    if session.begun {
+        command.args(["--resume", &session.id]);
+    } else {
+        command.args(["--session-id", &session.id]);
     }
 
     // A thread must not outlive Anna: stopping her stops everything
@@ -90,24 +142,32 @@ fn turn(directory: &Path, endpoint: &Endpoint, message: &str) -> Result<Command>
     Ok(command)
 }
 
-/// Claude under katami when katami is installed: the thread then gets what
-/// Anna has learned put in front of it, and its conversation is reviewed for
-/// things worth remembering. Hands never run this way — they don't read
-/// memory, and what they write isn't trusted enough to become it.
-fn remembering_claude() -> Result<Command> {
-    match paths::program("katami") {
-        Some(katami) => {
-            let mut command = Command::new(katami);
-            command.arg("claude");
-            Ok(command)
-        }
-        None => Ok(Command::new(claude::binary()?)),
-    }
-}
-
 fn role() -> String {
     match config::personality() {
         Some(personality) => format!("{ROLE}\n\n{personality}"),
         None => ROLE.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_session_keeps_its_id_once_it_has_begun() {
+        let directory = std::env::temp_dir().join(format!("anna-session-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+
+        let first = Session::of(&directory).unwrap();
+        assert!(!first.begun);
+        assert_eq!(first.id.len(), 36);
+        assert_eq!(&first.id[14..15], "4");
+        assert_ne!(first.id, Session::of(&directory).unwrap().id);
+
+        first.keep().unwrap();
+        let again = Session::of(&directory).unwrap();
+        assert!(again.begun);
+        assert_eq!(again.id, first.id);
+        fs::remove_dir_all(directory).unwrap();
     }
 }

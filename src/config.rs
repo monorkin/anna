@@ -30,6 +30,14 @@ pub struct Config {
     /// Set to false when something else already runs `ax auto-switch`.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub rotate_accounts: bool,
+    /// How long one run of a thread, a hand or a reviewer may take before it
+    /// is stopped. The only hard stop Anna has.
+    #[serde(default = "an_hour")]
+    pub minutes_per_run: u64,
+}
+
+fn an_hour() -> u64 {
+    60
 }
 
 fn yes() -> bool {
@@ -48,6 +56,7 @@ impl Default for Config {
             sources: BTreeMap::new(),
             people: BTreeMap::new(),
             rotate_accounts: true,
+            minutes_per_run: an_hour(),
         }
     }
 }
