@@ -51,12 +51,15 @@ struct Tool {
     title: &'static str,
     program: &'static str,
     can_be_its_own_agent: bool,
+    /// Places where colleagues hand out work, so where it matters whose word
+    /// the agent acts on. Mail is not one: anyone can write to an inbox.
+    asks_who_to_trust: bool,
 }
 
 const TOOLS: [Tool; 3] = [
-    Tool { name: "basecamp", title: "Basecamp", program: "basecamp", can_be_its_own_agent: true },
-    Tool { name: "hey", title: "HEY", program: "hey", can_be_its_own_agent: false },
-    Tool { name: "fizzy", title: "Fizzy", program: "fizzy", can_be_its_own_agent: false },
+    Tool { name: "basecamp", title: "Basecamp", program: "basecamp", can_be_its_own_agent: true, asks_who_to_trust: true },
+    Tool { name: "hey", title: "HEY", program: "hey", can_be_its_own_agent: false, asks_who_to_trust: false },
+    Tool { name: "fizzy", title: "Fizzy", program: "fizzy", can_be_its_own_agent: false, asks_who_to_trust: true },
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +86,7 @@ trait Doing {
     fn can_watch(&mut self, tool: &str) -> bool;
     fn add_server(&mut self, name: &str, command: &[String], env: BTreeMap<String, String>) -> Result<()>;
     fn add_source(&mut self, name: &str, source: Source) -> Result<()>;
+    fn trust(&mut self, address: &str, name: &str) -> Result<()>;
 }
 
 struct Wizard<'a> {
@@ -262,9 +266,16 @@ impl Wizard<'_> {
         if let Err(error) = self.doing.add_server(tool.name, &command, own_tool_config()) {
             return self.asking.trouble(&format!("Couldn't add the {} server: {error:#}", tool.title));
         }
-        self.doing.add_source(tool.name, basecamp_source(&profile, &account.id, watches))?;
+
+        let trusted = self.trusted_people(tool, agent)?;
+        self.doing.add_source(tool.name, basecamp_source(&profile, &account.id, watches, trusted == 0))?;
 
         self.asking.done(&format!("{agent} is in {} under its own profile, in {}.", tool.title, account.name))?;
+        if trusted == 0 {
+            self.asking.done(&format!("Nobody was named, so {agent} takes work from anyone who can reach it there."))?;
+        } else {
+            self.asking.done(&format!("{agent} takes work from the people you named, and ignores everyone else."))?;
+        }
         if watches {
             self.asking.done(&format!("{agent} hears about mentions and assignments the moment they happen."))
         } else {
@@ -288,10 +299,49 @@ impl Wizard<'_> {
             },
             _ => words(&[tool.program, "mcp"]),
         };
-        match self.doing.add_server(tool.name, &command, BTreeMap::new()) {
-            Ok(()) => self.asking.done(&format!("{agent} can use {} as {who}.", tool.title)),
-            Err(error) => self.asking.trouble(&format!("Couldn't add the {} server: {error:#}", tool.title)),
+        if let Err(error) = self.doing.add_server(tool.name, &command, BTreeMap::new()) {
+            return self.asking.trouble(&format!("Couldn't add the {} server: {error:#}", tool.title));
         }
+        self.asking.done(&format!("{agent} can use {} as {who}.", tool.title))?;
+
+        if tool.asks_who_to_trust {
+            self.trusted_people(tool, agent)?;
+        }
+        Ok(())
+    }
+
+    /// Who the agent takes work from. It acts on what these people ask and
+    /// ignores everyone else, however they reach it — the one decision about
+    /// authority that is made by a person, here, and looked up in code ever
+    /// after. Whoever is running setup is offered first.
+    fn trusted_people(&mut self, tool: &Tool, agent: &str) -> Result<usize> {
+        let mut trusted = 0;
+        let hint = format!("{agent} acts on what trusted people ask, and on nobody else's word. They are matched by the email address {} reports.", tool.title);
+
+        for address in self.doing.logged_in_as(tool.name) {
+            let question = format!("Should {agent} take work from {address}?");
+            if self.asking.yes(&Question { title: "Trusted person", question: &question, hint: &hint }, true)? {
+                trusted += self.trust(agent, &address)?;
+            }
+        }
+
+        let question = format!("Who else should {agent} take work from in {}? Their email address.", tool.title);
+        let last_hint = format!("{hint} Enter when there's nobody else.");
+        while let Some(address) = self.asking.string(&Question { title: "Trusted person", question: &question, hint: &last_hint }, None)? {
+            trusted += self.trust(agent, &address)?;
+        }
+        Ok(trusted)
+    }
+
+    fn trust(&mut self, agent: &str, address: &str) -> Result<usize> {
+        let suggested = name_from(address);
+        let question = format!("What should {agent} call them?");
+        let name_question = Question { title: "Their name", question: &question, hint: "How the agent refers to this person." };
+        let name = self.asking.string(&name_question, Some(&suggested))?.unwrap_or(suggested);
+
+        self.doing.trust(address, &name)?;
+        self.asking.done(&format!("{agent} takes work from {name} ({address})."))?;
+        Ok(1)
     }
 
     fn pick_account(&mut self, tool: &Tool, profile: Option<&str>) -> Result<Option<Account>> {
@@ -343,9 +393,10 @@ More Claude subscriptions for {agent} to rotate between:
 /// makes one new is its id and when it went unread; the body is an excerpt,
 /// so the thread gets the title, the excerpt and the link to read the rest;
 /// and there is no single call that answers, so the thread answers with
-/// Basecamp's own tools. It listens to anyone, because Basecamp already
-/// decides who can reach an agent: the people in the projects it was added to.
-fn basecamp_source(profile: &str, account: &str, watches: bool) -> Source {
+/// Basecamp's own tools. `anyone` is for when setup named no trusted people:
+/// Basecamp already decides who can reach an agent — the people in the
+/// projects it was added to — and then that is the only gate.
+fn basecamp_source(profile: &str, account: &str, watches: bool, anyone: bool) -> Source {
     Source {
         server: "basecamp".to_string(),
         watch: Call { tool: "basecamp_account".to_string(), arguments: json!({ "action": "get_my_notifications" }) },
@@ -355,7 +406,7 @@ fn basecamp_source(profile: &str, account: &str, watches: bool) -> Source {
         conversation: "/readable_sgid".to_string(),
         sender: "/creator/email_address".to_string(),
         sender_name: Some("/creator/name".to_string()),
-        anyone: true,
+        anyone,
         text: Pointers::Several(vec!["/title".to_string(), "/content_excerpt".to_string(), "/app_url".to_string()]),
         reply: None,
         trigger: if watches {
@@ -374,6 +425,16 @@ fn basecamp_source(profile: &str, account: &str, watches: bool) -> Source {
 /// there: its config lives in the agent's folder, not the person's.
 fn own_tool_config() -> BTreeMap<String, String> {
     BTreeMap::from([("XDG_CONFIG_HOME".to_string(), paths::tools_config_home().to_string_lossy().into_owned())])
+}
+
+/// A name to suggest for an address: marta.k@example.com is probably Marta.
+fn name_from(address: &str) -> String {
+    let first = address.split(['@', '.', '+', '_', '-']).next().unwrap_or_default();
+    let mut letters = first.chars();
+    match letters.next() {
+        Some(initial) => initial.to_uppercase().chain(letters).collect(),
+        None => address.to_string(),
+    }
 }
 
 fn profile_name(agent: &str) -> String {
@@ -512,6 +573,12 @@ impl Doing for Machine {
         config.sources.insert(name.to_string(), source);
         config.save()
     }
+
+    fn trust(&mut self, address: &str, name: &str) -> Result<()> {
+        let mut config = Config::load()?;
+        config.people.insert(address.to_string(), name.to_string());
+        config.save()
+    }
 }
 
 fn json_from(program: &str, arguments: &[&str]) -> Option<Value> {
@@ -602,6 +669,7 @@ mod tests {
         logged_in: Vec<String>,
         servers: Vec<(String, Vec<String>)>,
         server_env: Vec<BTreeMap<String, String>>,
+        trusted: Vec<(String, String)>,
         sources: Vec<(String, Source)>,
         watches: bool,
     }
@@ -676,6 +744,11 @@ mod tests {
             self.sources.push((name.to_string(), source));
             Ok(())
         }
+
+        fn trust(&mut self, address: &str, name: &str) -> Result<()> {
+            self.trusted.push((address.to_string(), name.to_string()));
+            Ok(())
+        }
     }
 
     fn walk(asking: &mut Scripted, doing: &mut Pretend, name: &str) -> PathBuf {
@@ -695,6 +768,8 @@ mod tests {
             "y", "bad-key", "good-key",                // Jev, a refused key, a good one
             "y", "y", "client-123", "s3cret",          // Basecamp, as an agent, its client ID and secret
             "2",                                       // the second account
+            "y", "",                                   // trust whoever runs setup, under the suggested name
+            "marta.k@example.com", "Marta K", "",      // and one more person
             "y", "y",                                  // HEY, confirm as me
         ]);
         let mut doing = Pretend { installed: vec!["basecamp", "hey"], watches: true, ..Pretend::default() };
@@ -714,7 +789,11 @@ mod tests {
         assert!(doing.server_env[1].is_empty(), "a tool used as you runs with your own config");
         let (name, source) = &doing.sources[0];
         assert_eq!(name, "basecamp");
-        assert!(source.anyone);
+        assert_eq!(
+            doing.trusted,
+            [("me@basecamp.example.com".to_string(), "Me".to_string()), ("marta.k@example.com".to_string(), "Marta K".to_string())]
+        );
+        assert!(!source.anyone, "with trusted people named, nobody else is heard");
         assert_eq!(source.reply, None);
         assert_eq!(source.trigger.as_ref().unwrap().args, words(&["--profile", "botten", "watch", "--json", "--account", "222"]));
 
@@ -751,7 +830,27 @@ mod tests {
         assert_eq!(doing.servers, [("basecamp".to_string(), words(&["basecamp", "mcp", "--account", "111"]))]);
         assert!(doing.sources.is_empty());
         assert!(doing.logged_in.is_empty());
+        assert_eq!(doing.trusted, [("me@basecamp.example.com".to_string(), "Me".to_string())], "enter trusts whoever runs setup");
         let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[test]
+    fn an_agent_with_nobody_named_takes_work_from_anyone_who_can_reach_it() {
+        let mut asking = Scripted::answering(&["", "", "", "", "", "y", "y", "client-123", "s3cret", "1", "n", ""]);
+        let mut doing = Pretend { installed: vec!["basecamp"], ..Pretend::default() };
+        let config_dir = walk(&mut asking, &mut doing, "anyone");
+
+        assert!(doing.trusted.is_empty());
+        assert!(doing.sources[0].1.anyone);
+        assert!(asking.said.iter().any(|it| it.contains("takes work from anyone who can reach it")));
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[test]
+    fn a_name_is_suggested_from_the_address() {
+        assert_eq!(name_from("marta.k@example.com"), "Marta");
+        assert_eq!(name_from("ivo@example.com"), "Ivo");
+        assert_eq!(name_from("@example.com"), "@example.com");
     }
 
     #[test]

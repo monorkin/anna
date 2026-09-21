@@ -52,6 +52,12 @@ source:
   service with lingering; Jev, and the key typed without echo and checked
   before it is kept. Then one block per tool whose command line is installed:
   Basecamp, HEY, Fizzy. It closes with how to add any MCP server.
+- Basecamp's and Fizzy's blocks ask who the agent takes work from. Whoever is
+  running setup is offered first (enter says yes), then anyone else by email,
+  each with a name suggested from the address. They go into `people`. For a
+  Basecamp agent that settles who is heard: with people named, only them;
+  with nobody named, anyone who can reach the agent there. HEY doesn't ask —
+  anyone can write to an inbox, so there is nobody to name.
 - A tool is given to the agent as itself or as you, and only the first
   listens. As a Basecamp agent it gets its own CLI profile, the verified
   Basecamp source with `anyone: true` — Basecamp already decides who can reach
