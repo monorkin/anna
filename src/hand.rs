@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::broker::{self, Endpoint, Tool};
-use crate::claude;
+use crate::claude::{self, Started};
 use crate::clock;
 use crate::logs;
 use crate::paths;
@@ -82,7 +82,7 @@ impl Hand {
         self.rejections
     }
 
-    pub fn work(&mut self, brief: &str, outside: &Outside) -> Result<String> {
+    pub fn work(&mut self, brief: &str, outside: &Outside, started: &Started) -> Result<String> {
         self.asked.push(brief.to_string());
         let sandbox = Sandbox {
             project: self.project.clone(),
@@ -101,7 +101,7 @@ impl Hand {
             command.args(["--resume", session]);
         }
 
-        let reply = claude::reply_of(&mut command, outside.time_limit);
+        let reply = claude::reply_of(&mut command, outside.time_limit, Some(started));
         // Where there was no repository the sandbox covers .git, which leaves
         // an empty folder behind; only an empty one can be removed this way
         let _ = fs::remove_dir(self.project.join(".git"));

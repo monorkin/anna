@@ -16,6 +16,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use crate::logs;
@@ -32,6 +33,7 @@ pub trait Tool: Send + Sync {
 
 pub struct Endpoint {
     socket: PathBuf,
+    closed: Arc<AtomicBool>,
 }
 
 impl Endpoint {
@@ -43,18 +45,25 @@ impl Endpoint {
         let listener = UnixListener::bind(socket)
             .with_context(|| format!("could not listen on {}", socket.display()))?;
         let tools = Arc::new(tools);
+        let closed = Arc::new(AtomicBool::new(false));
 
+        let closed_for_listening = closed.clone();
         thread::spawn(move || {
             for session in listener.incoming().flatten() {
+                if closed_for_listening.load(Ordering::Relaxed) {
+                    break;
+                }
                 let tools = Arc::clone(&tools);
+                let closed = closed_for_listening.clone();
                 thread::spawn(move || {
-                    let _ = serve(session, &tools);
+                    let _ = serve(session, &tools, &closed);
                 });
             }
         });
 
         Ok(Endpoint {
             socket: socket.to_path_buf(),
+            closed,
         })
     }
 
@@ -73,16 +82,26 @@ pub fn mcp_config(socket: &Path) -> String {
     .to_string()
 }
 
+/// An endpoint is a session's grant, and it ends with the session: the
+/// listener stops — woken by one last connection, since nothing else stops
+/// an accept — and whoever is still connected is served nothing more.
+/// Without this every turn would leave a thread, a socket and its tools
+/// behind for as long as Anna runs.
 impl Drop for Endpoint {
     fn drop(&mut self) {
+        self.closed.store(true, Ordering::Relaxed);
+        let _ = UnixStream::connect(&self.socket);
         let _ = fs::remove_file(&self.socket);
     }
 }
 
-fn serve(session: UnixStream, tools: &[Box<dyn Tool>]) -> Result<()> {
+fn serve(session: UnixStream, tools: &[Box<dyn Tool>], closed: &AtomicBool) -> Result<()> {
     let mut writer = session.try_clone()?;
     for line in BufReader::new(session).lines() {
         let line = line?;
+        if closed.load(Ordering::Relaxed) {
+            break;
+        }
         if line.trim().is_empty() {
             continue;
         }
@@ -202,5 +221,11 @@ mod tests {
         assert_eq!(unknown["error"]["code"], -32601);
 
         assert!(mcp_config(endpoint.socket()).contains(&format!("UNIX-CONNECT:{}", socket.display())));
+
+        drop(endpoint);
+        assert!(!socket.exists());
+        writeln!(stream, "{}", json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "echo", "arguments": { "text": "hi" } } })).unwrap();
+        let mut line = String::new();
+        assert_eq!(reader.read_line(&mut line).unwrap(), 0, "a session still connected after its endpoint is gone is served nothing more");
     }
 }

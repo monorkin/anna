@@ -97,7 +97,7 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
     let mut command = turn(&directory, &endpoint, &session, standing, &role, &message)?;
     memory.cover(&mut command);
 
-    let outcome = claude::reply_of(&mut command, runtime.outside.time_limit);
+    let outcome = claude::reply_of(&mut command, runtime.outside.time_limit, None);
     memory.finish();
     hands.discard_all();
 

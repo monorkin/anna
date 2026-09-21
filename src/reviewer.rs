@@ -14,7 +14,7 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 
-use crate::claude;
+use crate::claude::{self, Started};
 use crate::clock;
 use crate::logs;
 use crate::paths;
@@ -29,7 +29,7 @@ pub struct Verdict {
     pub notes: String,
 }
 
-pub fn review(project: &Path, brief: &str, report: &str, outside: &Outside) -> Result<Verdict> {
+pub fn review(project: &Path, brief: &str, report: &str, outside: &Outside, started: &Started) -> Result<Verdict> {
     let directory = paths::sessions_dir().join(format!("r{:x}", clock::nanos()));
     claude::write_hand_profile(&directory.join("profile"))?;
 
@@ -43,7 +43,7 @@ pub fn review(project: &Path, brief: &str, report: &str, outside: &Outside) -> R
     let mut command = sandbox.claude(&claude::binary()?);
     command.args(["-p", &prompt(brief, report), "--dangerously-skip-permissions", "--strict-mcp-config"]);
 
-    let outcome = claude::reply_of(&mut command, outside.time_limit);
+    let outcome = claude::reply_of(&mut command, outside.time_limit, Some(started));
     let _ = fs::remove_dir_all(&directory);
 
     let verdict = verdict_in(&outcome?.result)?;

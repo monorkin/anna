@@ -12,8 +12,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -51,7 +52,44 @@ impl std::fmt::Display for OutOfTime {
 
 impl std::error::Error for OutOfTime {}
 
-pub fn reply_of(command: &mut Command, limit: Duration) -> Result<Reply> {
+/// What a turn has running on its behalf that isn't below it: hands and
+/// reviewers are started by the broker, so stopping the turn's own process
+/// doesn't reach them. When the turn is over, whatever is still going is
+/// stopped, and nothing more is started for it.
+#[derive(Default)]
+pub struct Started {
+    processes: Mutex<HashSet<u32>>,
+    over: AtomicBool,
+}
+
+impl Started {
+    pub fn stop_all(&self) {
+        self.over.store(true, Ordering::Relaxed);
+        for process in self.processes.lock().unwrap().drain() {
+            stop_with_everything_it_started(process as libc::pid_t);
+        }
+    }
+
+    pub fn is_over(&self) -> bool {
+        self.over.load(Ordering::Relaxed)
+    }
+
+    fn add(&self, process: u32) {
+        self.processes.lock().unwrap().insert(process);
+        if self.is_over() {
+            self.stop_all();
+        }
+    }
+
+    fn remove(&self, process: u32) {
+        self.processes.lock().unwrap().remove(&process);
+    }
+}
+
+pub fn reply_of(command: &mut Command, limit: Duration, started: Option<&Started>) -> Result<Reply> {
+    if started.is_some_and(|it| it.is_over()) {
+        bail!("the turn this was for is over");
+    }
     let child = command
         .args(["--output-format", "json"])
         .stdin(Stdio::null())
@@ -60,8 +98,16 @@ pub fn reply_of(command: &mut Command, limit: Duration) -> Result<Reply> {
         .spawn()
         .context("could not run claude")?;
 
-    let watch = Watch::over(child.id(), limit);
-    let output = child.wait_with_output().context("could not wait for claude")?;
+    let process = child.id();
+    let watch = Watch::over(process, limit);
+    if let Some(started) = started {
+        started.add(process);
+    }
+    let output = child.wait_with_output().context("could not wait for claude");
+    if let Some(started) = started {
+        started.remove(process);
+    }
+    let output = output?;
     if watch.ran_out() {
         return Err(OutOfTime { minutes: limit.as_secs() / 60 }.into());
     }
@@ -251,11 +297,11 @@ mod tests {
     fn a_run_is_stopped_when_its_time_is_up() {
         let mut quick = Command::new("sh");
         quick.args(["-c", r#"echo '{"result":"done","session_id":"s1"}'"#]);
-        assert_eq!(reply_of(&mut quick, Duration::from_secs(10)).unwrap().result, "done");
+        assert_eq!(reply_of(&mut quick, Duration::from_secs(10), None).unwrap().result, "done");
 
         let mut endless = Command::new("sh");
         endless.args(["-c", "setsid sleep 31.4159 & wait"]);
-        let error = reply_of(&mut endless, Duration::from_millis(300)).unwrap_err();
+        let error = reply_of(&mut endless, Duration::from_millis(300), None).unwrap_err();
         assert!(error.downcast_ref::<OutOfTime>().is_some());
         thread::sleep(Duration::from_millis(100));
         assert!(!still_running("31.4159"), "a command in its own session outlived the stop");
@@ -264,7 +310,29 @@ mod tests {
 
         let mut failing = Command::new("sh");
         failing.args(["-c", r#"echo '{"result":"no quota","session_id":"s2","is_error":true}'"#]);
-        assert!(reply_of(&mut failing, Duration::from_secs(10)).unwrap_err().to_string().contains("no quota"));
+        assert!(reply_of(&mut failing, Duration::from_secs(10), None).unwrap_err().to_string().contains("no quota"));
+    }
+
+    #[test]
+    fn what_a_turn_started_is_stopped_when_the_turn_is_over() {
+        let started = Arc::new(Started::default());
+        let for_the_hand = started.clone();
+        let hand = thread::spawn(move || {
+            let mut working = Command::new("sh");
+            working.args(["-c", "setsid sleep 27.1828 & wait"]);
+            reply_of(&mut working, Duration::from_secs(60), Some(&for_the_hand))
+        });
+
+        thread::sleep(Duration::from_millis(300));
+        assert!(still_running("27.1828"));
+        started.stop_all();
+        assert!(hand.join().unwrap().is_err());
+        assert!(!still_running("27.1828"), "a hand outlived the turn it worked for");
+
+        let mut late = Command::new("sh");
+        late.args(["-c", "echo '{}'"]);
+        let refused = reply_of(&mut late, Duration::from_secs(10), Some(&started)).unwrap_err();
+        assert_eq!(refused.to_string(), "the turn this was for is over");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! did and send it back to clean up; whatever is still alive when the thread
 //! goes back to sleep is discarded.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::Path;
@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::broker::Tool;
+use crate::claude::Started;
 use crate::conversation::Conversation;
 use crate::editor::Editor;
 use crate::hand::Hand;
@@ -25,10 +26,16 @@ const ROUNDS_BEFORE_RETHINKING: u32 = 3;
 #[derive(Default)]
 pub struct Hands {
     alive: Mutex<HashMap<String, Hand>>,
+    started: Started,
 }
 
 impl Hands {
+    /// For when the turn is over, however it ended. A hand that is in the
+    /// middle of working isn't among the ones kept here, so what it and its
+    /// reviewer are running is stopped first: a turn that ran out of time
+    /// must not leave a hand changing files behind it.
     pub fn discard_all(&self) {
+        self.started.stop_all();
         for (_, hand) in self.alive.lock().unwrap().drain() {
             hand.discard();
         }
@@ -179,11 +186,16 @@ impl Workshop {
     /// can't be reviewed is discarded rather than left in an unknown state.
     fn round(&self, mut hand: Hand, ask: &str) -> Result<String> {
         let id = hand.id().to_string();
+        let started = &self.hands.started;
         let outcome = hand
-            .work(ask, &self.outside)
-            .and_then(|report| reviewer::review(hand.project(), &hand.asked(), &report, &self.outside));
+            .work(ask, &self.outside, started)
+            .and_then(|report| reviewer::review(hand.project(), &hand.asked(), &report, &self.outside, started));
 
         match outcome {
+            Ok(_) if started.is_over() => {
+                hand.discard();
+                bail!("the turn hand {id} was working for is over, so it was discarded")
+            }
             Ok(verdict) => {
                 let told = self.telling(&id, &verdict, &mut hand);
                 self.hands.keep(hand);
