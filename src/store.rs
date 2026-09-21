@@ -95,6 +95,18 @@ impl Store {
         Ok(store)
     }
 
+    /// A consistent copy of the whole database, safe to take while threads
+    /// and the scheduler are writing: SQLite builds it from one read
+    /// transaction. Copying the file instead could catch it mid-write, and
+    /// would miss whatever is still in the write-ahead log.
+    pub fn snapshot_to(&self, path: &Path) -> Result<()> {
+        let _ = std::fs::remove_file(path);
+        self.connection
+            .execute("VACUUM INTO ?1", params![path.to_string_lossy()])
+            .with_context(|| format!("could not snapshot the database to {}", path.display()))?;
+        Ok(())
+    }
+
     fn migrate(&self) -> Result<()> {
         let version: usize = self.connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         for (index, migration) in MIGRATIONS.iter().enumerate().skip(version) {

@@ -1,3 +1,4 @@
+mod backup;
 mod broker;
 mod claude;
 mod clock;
@@ -59,6 +60,22 @@ enum Command {
     Poke { source: Option<String> },
     /// Run Anna in this terminal: listen on every source until stopped
     Run,
+    /// Write everything that makes this Anna this Anna to a zip; safe while she runs
+    Backup {
+        /// Where to write the zip; defaults to anna-backup-<time>.zip here
+        #[usage(long)]
+        to: Option<std::path::PathBuf>,
+        /// Leave her tokens out of the zip
+        #[usage(long)]
+        without_secrets: bool,
+    },
+    /// Bring an Anna back from a backup zip; she has to be stopped
+    Restore {
+        path: std::path::PathBuf,
+        /// Replace the Anna that is already set up here
+        #[usage(long)]
+        force: bool,
+    },
     /// Talk to Anna from this terminal
     Chat {
         message: String,
@@ -159,6 +176,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Status => lifecycle::status(),
         Command::Poke { source } => lifecycle::poke(source.as_deref()),
         Command::Run => dispatcher::run(),
+        Command::Backup { to, without_secrets } => backup::backup(to, without_secrets),
+        Command::Restore { path, force } => backup::restore(&path, force),
         Command::Chat { message, conversation } => {
             thread::wake(&Runtime::start()?, Arc::new(Terminal::new(&conversation)), &message)
         }

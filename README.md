@@ -45,6 +45,11 @@ anna chat "the deploy is red, have a look" # or talk to her from this terminal
 anna chat --conversation billing "..."    # each conversation is its own thread
 anna log -f                               # watch what she's doing
 
+# Backups
+anna backup                               # everything that makes her her, in one zip; safe while she runs
+anna backup --to ~/anna.zip --without-secrets
+anna restore ~/anna.zip                   # she has to be stopped; --force replaces an Anna already set up here
+
 # MCP servers: how she acts, and where she listens
 anna mcp add basecamp -- basecamp mcp     # also accepts a server's changed tools
 anna mcp list

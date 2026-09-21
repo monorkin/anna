@@ -76,6 +76,35 @@ source:
 - `anna source check <name>` reads a source once and shows what Anna would
   make of it, without remembering or waking anything. Run read-only against
   the real server: 23 of 23 notifications parsed.
+- A store. One SQLite file (`anna.db`, WAL, numbered migrations on
+  `user_version`) for Anna's own moving parts — not katami's memory, which
+  holds what she has learned. The next thing she has to keep is a table away.
+- Threads schedule their own work: `schedule`, `list_schedules`,
+  `cancel_schedule`. Five-field cron in local time for what repeats, a date
+  and time for what happens once. A schedule belongs to the conversation it
+  was made in, and when it comes due that thread is woken there with the task.
+  The limits are in code: nothing more often than every five minutes, twenty
+  per conversation. A schedule is moved on before its thread is woken, so a
+  task that crashes her isn't the first thing she runs on the way back up, and
+  one missed while she was down runs once.
+- Threads keep out of each other's way: `claim_work`, `finish_work`,
+  `list_work`, `tell_thread`. Every waking thread is shown what the others have
+  claimed, so two cards about one bug are noticed before the work starts. A
+  message to another thread wakes it in its own conversation; it is screened
+  like any untrusted text and a thread may send ten an hour. Run live: the
+  second report recognised the first thread's claim, told its person it was
+  one bug, and passed its detail across.
+- The judge outlives a Jev outage: a few spaced tries, then haiku. Found when
+  Jev answered 529 during a test and Anna refused everyone. When nothing can
+  check a message she now says so instead of calling it an attack.
+- `anna backup` and `anna restore`. One zip, written 600: config, style,
+  CLAUDE.md, tokens (unless `--without-secrets`), the database snapshotted
+  through SQLite so it is safe while she runs, the log, which messages each
+  source has seen, every thread's session and the Claude transcript behind it,
+  and katami's export of what she has learned. Transcripts are filed by thread
+  name, so a backup restores under a different home. Restore refuses while she
+  runs, refuses to replace an existing Anna without `--force`, and refuses
+  entries that try to leave their folder.
 - One binary. katami and ax are library crates with a thin binary each
   (`cli.rs` holds their command line), and Anna depends on both by path.
   `anna memory …` and `anna claude account …` are their own subcommands
@@ -108,8 +137,8 @@ Not built, or not working yet:
   `npm install`, `cargo build` — since a hand has no network, and Rust itself,
   which lives under cargo's and rustup's folders next to credentials. Likely
   answer: registries as something the proxy can be told to allow per hand.
-- The in-flight table, the classifier-driven dispatcher (routing, model
-  choice), and transcripts of hands being kept for memory.
+- The classifier-driven dispatcher (routing, model choice), and transcripts
+  of hands being kept for memory.
 
 ## Decided
 
