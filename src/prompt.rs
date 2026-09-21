@@ -27,8 +27,6 @@ pub trait Asking {
     fn done(&mut self, text: &str) -> Result<()>;
     fn trouble(&mut self, text: &str) -> Result<()>;
     fn note(&mut self, text: &str) -> Result<()>;
-    /// Hands the terminal to another program until it exits.
-    fn hand_over_to(&mut self, command: &mut Command) -> Result<bool>;
 }
 
 pub struct Terminal<I, O> {
@@ -204,11 +202,6 @@ impl<I: BufRead, O: Write> Asking for Terminal<I, O> {
             writeln!(self.output, "  {line}")?;
         }
         Ok(())
-    }
-
-    fn hand_over_to(&mut self, command: &mut Command) -> Result<bool> {
-        self.output.flush()?;
-        Ok(command.status().context("could not start it")?.success())
     }
 }
 

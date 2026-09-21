@@ -17,6 +17,10 @@ const OTHERS_CAN_DO_ANYTHING: u32 = 0o077;
 /// Writes through a temp file, so a crash never leaves half a config, and
 /// with the final permissions from the first byte.
 pub fn write_private(path: &Path, contents: &str) -> Result<()> {
+    write_private_bytes(path, contents.as_bytes())
+}
+
+pub fn write_private_bytes(path: &Path, contents: &[u8]) -> Result<()> {
     let directory = path.parent().context("the file has no folder")?;
     fs::DirBuilder::new().recursive(true).mode(0o700).create(directory)?;
 
@@ -27,7 +31,7 @@ pub fn write_private(path: &Path, contents: &str) -> Result<()> {
         .truncate(true)
         .mode(0o600)
         .open(&temporary)?;
-    std::io::Write::write_all(&mut file, contents.as_bytes())?;
+    std::io::Write::write_all(&mut file, contents)?;
     fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
     fs::rename(&temporary, path)?;
     Ok(())

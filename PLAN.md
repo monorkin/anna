@@ -112,6 +112,31 @@ source:
 - The judge outlives a Jev outage: a few spaced tries, then haiku. Found when
   Jev answered 529 during a test and Anna refused everyone. When nothing can
   check a message she now says so instead of calling it an attack.
+- Her own state, in her own folder. katami's store is `config/katami` and
+  ax's is `config/ax`, through `KATAMI_DATA_DIR` and `AX_DATA_DIR`, which both
+  libraries now honour and which `main` sets before anything else — so a
+  review katami runs as `anna review …` finds the same store. Her memory is no
+  longer shared with the person's other sessions. The tools she has a profile
+  of her own in run with `XDG_CONFIG_HOME` pointed at `config/tools`, carried
+  as `env` on the MCP server and the trigger, so nothing she is set up with
+  lands in the person's config for that tool. All of it is in the backup; the
+  accounts only when tokens are. Still shared: the Claude login itself. ax
+  rotates the default `~/.claude` login, so her rotation moves the person's.
+- A circuit breaker on Jev. A call gets one second; slower than that, or an
+  error, is a failure. Five in ten minutes and Jev is left alone for thirty.
+  A refused key switches it off until she restarts. Haiku answers meanwhile.
+  This replaced the retry-with-backoff from the day before. Setup's "does this
+  key work" asks Jev directly now — through the judge, a bad key passed,
+  because haiku answered for it.
+- Basecamp agents log in with the command line's own agent login
+  (`auth login --with-client-credentials`, client ID and secret from
+  Adminland), under a profile named after the agent, in her tools folder.
+  Setup checks the installed basecamp has it and says so plainly when it
+  doesn't. The first version handed the terminal to Claude with the pasted
+  instruction; run for real, it made `anna` the person's default Basecamp
+  profile, stored their token under it, wrote credentials to
+  `~/.basecamp-agent`, and tried to build the CLI from source. Setup doesn't
+  hand a free-running agent the terminal any more.
 - End-to-end runs don't touch TypeSafe. `jev_url` in the config says where
   Jev is reached — a gateway, or `script/stub-jev`, which answers "yes" to any
   text holding one of a few fixed phrases and "no" to everything else. That

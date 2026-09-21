@@ -209,6 +209,7 @@ fn poke_for_every_line(trigger: &Trigger, poke: &Sender<()>) -> Result<()> {
     let mut command = Command::new(&trigger.command);
     command
         .args(&trigger.args)
+        .envs(&trigger.env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -391,7 +392,12 @@ mod tests {
         Trigger {
             command: "sh".to_string(),
             args: vec!["-c".to_string(), script.to_string()],
+            env: Default::default(),
         }
+    }
+
+    fn trigger_called(command: &str) -> Trigger {
+        Trigger { command: command.to_string(), args: Vec::new(), env: Default::default() }
     }
 
     #[test]
@@ -405,6 +411,6 @@ mod tests {
         assert!(error.to_string().contains("exited with"));
         assert_eq!(poked.try_iter().count(), 1);
 
-        assert!(poke_for_every_line(&Trigger { command: "no-such-program-anywhere".to_string(), args: vec![] }, &poke).is_err());
+        assert!(poke_for_every_line(&trigger_called("no-such-program-anywhere"), &poke).is_err());
     }
 }

@@ -1,4 +1,5 @@
 mod backup;
+mod breaker;
 mod broker;
 mod claude;
 mod clock;
@@ -149,6 +150,8 @@ enum McpCommand {
 }
 
 fn main() {
+    paths::claim_own_state();
+
     // Rust ignores SIGPIPE, which turns `anna log | head` into a panic
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);

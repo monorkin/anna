@@ -1,8 +1,9 @@
 //! `anna backup` and `anna restore`: everything that makes this Anna this
 //! Anna, in one zip.
 //!
-//! What goes in: the config with her style and CLAUDE.md, her tokens, the
-//! database of schedules and the work board, which messages each source has
+//! What goes in: the config with her style and CLAUDE.md, her tokens and the
+//! Claude accounts she rotates between, the config of the tools she has her
+//! own profile in, the database of schedules and the work board, which messages each source has
 //! already seen, the log, every thread's session and the Claude transcript
 //! behind it — without those a restored thread would have forgotten its
 //! conversation — and an export of what she has learned.
@@ -54,6 +55,7 @@ pub fn backup(to: Option<PathBuf>, without_secrets: bool) -> Result<()> {
     archive.add_config()?;
     if !without_secrets {
         archive.add_secrets()?;
+        archive.add_accounts()?;
     }
     archive.add_database()?;
     archive.add_data_files()?;
@@ -85,11 +87,21 @@ struct Archive {
 }
 
 impl Archive {
+    /// Her own files, and the config of the tools she has a profile of her
+    /// own in. Their credentials are usually in the keyring, which nothing
+    /// can export, so after a restore on another machine those tools need
+    /// logging in again.
     fn add_config(&mut self) -> Result<()> {
         for name in CONFIG_FILES {
             self.add_file_if_there(&paths::config_dir().join(name), &format!("config/{name}"))?;
         }
-        Ok(())
+        self.add_tree(&paths::tools_config_home(), "config/tools")
+    }
+
+    /// The Claude accounts she rotates between. They are logins, so they go
+    /// wherever her tokens go and stay out when those do.
+    fn add_accounts(&mut self) -> Result<()> {
+        self.add_tree(&paths::accounts_dir(), "config/ax")
     }
 
     /// From wherever each one lives — keyring or file — so restoring doesn't
@@ -245,7 +257,7 @@ fn destination_of(name: &str) -> Result<Option<PathBuf>> {
 
 fn put(destination: &Path, contents: &[u8], steers_anna: bool) -> Result<()> {
     if steers_anna {
-        fsutil::write_private(destination, &String::from_utf8_lossy(contents))
+        fsutil::write_private_bytes(destination, contents)
     } else {
         if let Some(directory) = destination.parent() {
             fs::create_dir_all(directory)?;

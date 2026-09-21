@@ -8,17 +8,18 @@ use crate::config::{Config, McpServer};
 use crate::mcp::{self, Server};
 
 pub fn add(name: &str, command: &[String]) -> Result<()> {
-    register(name, command)?;
+    register(name, command, BTreeMap::new())?;
     println!("Added {name}.");
     list_one(name, &Config::load()?.mcp_servers[name])
 }
 
 /// Adding without a word, for setup, which has its own way of saying things.
-pub fn register(name: &str, command: &[String]) -> Result<()> {
+pub fn register(name: &str, command: &[String], env: BTreeMap<String, String>) -> Result<()> {
     let (program, args) = command.split_first().context("give the command that starts the server after --")?;
     let mut settings = McpServer {
         command: program.clone(),
         args: args.to_vec(),
+        env,
         prose: BTreeMap::new(),
         fingerprint: None,
     };

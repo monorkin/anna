@@ -23,6 +23,36 @@ pub fn program(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// What she has learned: katami's store, kept as her own rather than shared
+/// with the person's other sessions.
+pub fn memory_dir() -> PathBuf {
+    config_dir().join("katami")
+}
+
+/// The Claude accounts she rotates between: ax's store, kept as her own.
+pub fn accounts_dir() -> PathBuf {
+    config_dir().join("ax")
+}
+
+/// Where the command-line tools she works through keep their config when
+/// she runs them — her Basecamp profile, say. They are pointed here through
+/// XDG_CONFIG_HOME, so nothing she is set up with ever lands in, or changes,
+/// the person's own config for the same tool.
+pub fn tools_config_home() -> PathBuf {
+    config_dir().join("tools")
+}
+
+/// Points the libraries she is built on at her own folders. They read the
+/// environment, and so does everything she starts — a hook or a review that
+/// katami runs as `anna review …` has to find the same store she does.
+pub fn claim_own_state() {
+    // Before any thread exists: main calls this first
+    unsafe {
+        env::set_var("KATAMI_DATA_DIR", memory_dir());
+        env::set_var("AX_DATA_DIR", accounts_dir());
+    }
+}
+
 pub fn database() -> PathBuf {
     data_dir().join("anna.db")
 }

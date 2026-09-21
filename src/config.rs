@@ -141,6 +141,8 @@ pub struct Trigger {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -159,6 +161,10 @@ pub struct McpServer {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Set for the server on top of Anna's own environment. How a tool she
+    /// has a profile of her own in is kept to that profile.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     /// Tool name to the arguments that carry prose for people, which the
     /// editor restyles before the call goes out.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -230,6 +236,7 @@ mod tests {
             McpServer {
                 command: "basecamp".to_string(),
                 args: vec!["mcp".to_string()],
+                env: BTreeMap::from([("XDG_CONFIG_HOME".to_string(), "/home/someone/.config/anna/tools".to_string())]),
                 prose: BTreeMap::from([("create_comment".to_string(), vec!["content".to_string()])]),
                 fingerprint: Some("00000000deadbeef".to_string()),
             },

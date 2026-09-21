@@ -35,6 +35,7 @@ impl Server {
     pub fn start(settings: &McpServer) -> Result<Server> {
         let mut child = Command::new(&settings.command)
             .args(&settings.args)
+            .envs(&settings.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -293,6 +294,7 @@ done
         McpServer {
             command: "bash".to_string(),
             args: vec!["-c".to_string(), FAKE_SERVER.to_string()],
+            env: BTreeMap::new(),
             prose: BTreeMap::new(),
             fingerprint: None,
         }

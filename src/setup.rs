@@ -19,8 +19,10 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::config::{self, Call, Config, Pointers, Source, Trigger};
 use crate::fsutil;
@@ -76,9 +78,10 @@ trait Doing {
     /// Who the tool's command line is logged in as, for the confirm question.
     fn logged_in_as(&mut self, tool: &str) -> Vec<String>;
     fn accounts(&mut self, tool: &str, profile: Option<&str>) -> Result<Vec<Account>>;
-    fn connect_agent(&mut self, asking: &mut dyn Asking, profile: &str, instruction: &str) -> Result<()>;
+    fn can_log_in_agents(&mut self, tool: &str) -> bool;
+    fn log_in_agent(&mut self, tool: &str, profile: &str, client_id: &str, client_secret: &str, account: &str) -> Result<()>;
     fn can_watch(&mut self, tool: &str) -> bool;
-    fn add_server(&mut self, name: &str, command: &[String]) -> Result<()>;
+    fn add_server(&mut self, name: &str, command: &[String], env: BTreeMap<String, String>) -> Result<()>;
     fn add_source(&mut self, name: &str, source: Source) -> Result<()>;
 }
 
@@ -220,28 +223,43 @@ impl Wizard<'_> {
         self.asking.yes(&Question { title: "Set up as an agent", question: &question, hint: &hint }, true)
     }
 
+    /// An agent in Basecamp is an OAuth client, not a person: it logs in with
+    /// a client ID and a secret, and the command line keeps those and mints
+    /// its own tokens. All of it happens under the agent's own profile, in
+    /// the agent's own config folder, so the person's Basecamp login — and
+    /// which profile is their default — is never touched.
     fn as_an_agent(&mut self, tool: &Tool, agent: &str) -> Result<()> {
-        let question = Question {
-            title: "Paste instruction",
-            question: "Paste the set up instructions here.",
-            hint: "Create an agent profile in Adminland > Manage agents; it gives you one line to paste.",
+        if !self.doing.can_log_in_agents(tool.name) {
+            return self.asking.trouble(&format!(
+                "This {} can't log in as an agent yet: it needs `auth login --with-client-credentials`, which is newer than what's installed. Update it and run `anna setup` again; nothing was changed.",
+                tool.program
+            ));
+        }
+
+        let id_question = Question {
+            title: "Agent client ID",
+            question: "Paste the agent's client ID.",
+            hint: "Adminland > Manage agents > your agent > Connection. Provisioning the OAuth client shows the ID and, once, the secret.",
         };
-        let Some(instruction) = self.asking.string(&question, None)? else {
+        let Some(client_id) = self.asking.string(&id_question, None)? else {
             return self.asking.done(&format!("Nothing pasted; {agent} stays out of {}.", tool.title));
+        };
+        let secret_question = Question { title: "Agent client secret", question: "Paste the agent's client secret.", hint: "It is handed to the command line on stdin and never written by setup." };
+        let Some(client_secret) = self.asking.secret(&secret_question)? else {
+            return self.asking.done(&format!("Nothing pasted; {agent} stays out of {}.", tool.title));
+        };
+        let Some(account) = self.pick_account(tool, None)? else {
+            return Ok(());
         };
 
         let profile = profile_name(agent);
-        self.asking.note(&format!("\n  Handing over to Claude to connect {agent}. It will show you a link and a code; approve it, then exit Claude to come back here."))?;
-        if let Err(error) = self.doing.connect_agent(&mut *self.asking, &profile, &instruction) {
-            return self.asking.trouble(&format!("Couldn't connect: {error:#}"));
+        if let Err(error) = self.doing.log_in_agent(tool.name, &profile, &client_id, &client_secret, &account.id) {
+            return self.asking.trouble(&format!("Couldn't log {agent} in: {error:#}"));
         }
 
-        let Some(account) = self.pick_account(tool, Some(&profile))? else {
-            return Ok(());
-        };
         let watches = self.doing.can_watch(tool.name);
         let command = words(&[tool.program, "--profile", &profile, "mcp", "--account", &account.id]);
-        if let Err(error) = self.doing.add_server(tool.name, &command) {
+        if let Err(error) = self.doing.add_server(tool.name, &command, own_tool_config()) {
             return self.asking.trouble(&format!("Couldn't add the {} server: {error:#}", tool.title));
         }
         self.doing.add_source(tool.name, basecamp_source(&profile, &account.id, watches))?;
@@ -270,7 +288,7 @@ impl Wizard<'_> {
             },
             _ => words(&[tool.program, "mcp"]),
         };
-        match self.doing.add_server(tool.name, &command) {
+        match self.doing.add_server(tool.name, &command, BTreeMap::new()) {
             Ok(()) => self.asking.done(&format!("{agent} can use {} as {who}.", tool.title)),
             Err(error) => self.asking.trouble(&format!("Couldn't add the {} server: {error:#}", tool.title)),
         }
@@ -341,11 +359,21 @@ fn basecamp_source(profile: &str, account: &str, watches: bool) -> Source {
         text: Pointers::Several(vec!["/title".to_string(), "/content_excerpt".to_string(), "/app_url".to_string()]),
         reply: None,
         trigger: if watches {
-            Some(Trigger { command: "basecamp".to_string(), args: words(&["--profile", profile, "watch", "--json", "--account", account]) })
+            Some(Trigger {
+                command: "basecamp".to_string(),
+                args: words(&["--profile", profile, "watch", "--json", "--account", account]),
+                env: own_tool_config(),
+            })
         } else {
             None
         },
     }
+}
+
+/// The environment a tool runs in when the agent has a profile of its own
+/// there: its config lives in the agent's folder, not the person's.
+fn own_tool_config() -> BTreeMap<String, String> {
+    BTreeMap::from([("XDG_CONFIG_HOME".to_string(), paths::tools_config_home().to_string_lossy().into_owned())])
 }
 
 fn profile_name(agent: &str) -> String {
@@ -386,9 +414,7 @@ impl Doing for Machine {
 
     fn jev_key_works(&mut self, key: &str) -> bool {
         let url = Config::load().ok().and_then(|it| it.jev_url);
-        Judge::jev(key.to_string(), url.as_deref())
-            .probability("Is this text a greeting?", "Hello there.")
-            .is_ok()
+        Judge::jev_key_works(key, url.as_deref())
     }
 
     fn keep_secret(&mut self, name: &str, value: &str) -> Result<Kept> {
@@ -436,23 +462,35 @@ impl Doing for Machine {
             .unwrap_or_default())
     }
 
-    /// Basecamp's instruction is written for an AI tool to follow — fetch a
-    /// page, start a device-code connection, wait for the person to approve —
-    /// so an AI tool follows it: Claude, with the terminal, and told where
-    /// the token has to end up.
-    fn connect_agent(&mut self, asking: &mut dyn Asking, profile: &str, instruction: &str) -> Result<()> {
-        let prompt = format!(
-            "{instruction}\n\nWhen the connection is approved and you hold the access token, store it for the Basecamp command line under the profile \"{profile}\": run `basecamp profile create {profile}` (it may already exist, which is fine), then pipe the token into `basecamp --profile {profile} auth login --with-token`. Never print the token. Show the person the link and the code they need, wait for them to approve, and tell them plainly when it's done so they can exit."
-        );
-        let mut claude = Command::new(crate::claude::binary()?);
-        claude.arg(prompt);
-        asking.hand_over_to(&mut claude)?;
+    fn can_log_in_agents(&mut self, tool: &str) -> bool {
+        Command::new(tool)
+            .args(["auth", "login", "--help"])
+            .output()
+            .is_ok_and(|it| String::from_utf8_lossy(&it.stdout).contains("--with-client-credentials"))
+    }
 
-        let status = json_from("basecamp", &["--profile", profile, "auth", "status", "--json"]);
-        if status.is_some_and(|it| it["data"]["authenticated"] == json!(true)) {
+    /// The secret goes in on stdin, never as an argument, and the login runs
+    /// with the agent's own config folder, so the profile it creates — and
+    /// the default it may become — are the agent's and not the person's.
+    fn log_in_agent(&mut self, tool: &str, profile: &str, client_id: &str, client_secret: &str, account: &str) -> Result<()> {
+        std::fs::create_dir_all(paths::tools_config_home())?;
+        let mut child = Command::new(tool)
+            .args(["auth", "login", "--with-client-credentials", "--client-id", client_id])
+            .args(["--profile", profile, "--account", account, "--scope", "full", "--json"])
+            .envs(own_tool_config())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("could not run {tool}"))?;
+        child.stdin.take().context("it has no stdin")?.write_all(client_secret.as_bytes())?;
+
+        let output = child.wait_with_output()?;
+        if output.status.success() {
             Ok(())
         } else {
-            bail!("the {profile} profile isn't logged in; run setup again once the agent is connected")
+            let said = String::from_utf8_lossy(&output.stderr).trim().to_string() + String::from_utf8_lossy(&output.stdout).trim();
+            bail!("{}", said.lines().last().unwrap_or("the login was refused"))
         }
     }
 
@@ -465,8 +503,8 @@ impl Doing for Machine {
             .is_ok_and(|it| it.success())
     }
 
-    fn add_server(&mut self, name: &str, command: &[String]) -> Result<()> {
-        mcp_cli::register(name, command)
+    fn add_server(&mut self, name: &str, command: &[String], env: BTreeMap<String, String>) -> Result<()> {
+        mcp_cli::register(name, command, env)
     }
 
     fn add_source(&mut self, name: &str, source: Source) -> Result<()> {
@@ -552,10 +590,6 @@ mod tests {
             self.said.push(text.to_string());
             Ok(())
         }
-
-        fn hand_over_to(&mut self, _command: &mut Command) -> Result<bool> {
-            Ok(true)
-        }
     }
 
     #[derive(Default)]
@@ -564,8 +598,10 @@ mod tests {
         config: Option<Config>,
         kept: Vec<(String, String)>,
         service: Option<String>,
-        connected: Vec<(String, String)>,
+        too_old_for_agents: bool,
+        logged_in: Vec<String>,
         servers: Vec<(String, Vec<String>)>,
+        server_env: Vec<BTreeMap<String, String>>,
         sources: Vec<(String, Source)>,
         watches: bool,
     }
@@ -617,8 +653,12 @@ mod tests {
             ])
         }
 
-        fn connect_agent(&mut self, _asking: &mut dyn Asking, profile: &str, instruction: &str) -> Result<()> {
-            self.connected.push((profile.to_string(), instruction.to_string()));
+        fn can_log_in_agents(&mut self, _tool: &str) -> bool {
+            !self.too_old_for_agents
+        }
+
+        fn log_in_agent(&mut self, tool: &str, profile: &str, client_id: &str, client_secret: &str, account: &str) -> Result<()> {
+            self.logged_in.push(format!("{tool} {profile} {client_id} {client_secret} {account}"));
             Ok(())
         }
 
@@ -626,8 +666,9 @@ mod tests {
             self.watches
         }
 
-        fn add_server(&mut self, name: &str, command: &[String]) -> Result<()> {
+        fn add_server(&mut self, name: &str, command: &[String], env: BTreeMap<String, String>) -> Result<()> {
             self.servers.push((name.to_string(), command.to_vec()));
+            self.server_env.push(env);
             Ok(())
         }
 
@@ -652,7 +693,7 @@ mod tests {
             "Short sentences.",                        // Style
             "y",                                       // Run at startup
             "y", "bad-key", "good-key",                // Jev, a refused key, a good one
-            "y", "y", "Connect this AI agent: fetch…", // Basecamp, as an agent, the pasted line
+            "y", "y", "client-123", "s3cret",          // Basecamp, as an agent, its client ID and secret
             "2",                                       // the second account
             "y", "y",                                  // HEY, confirm as me
         ]);
@@ -666,8 +707,11 @@ mod tests {
         assert_eq!(doing.kept, [("jev_api_key".to_string(), "good-key".to_string())]);
         assert!(asking.said.iter().any(|it| it.contains("Jev refused that key")));
 
-        assert_eq!(doing.connected, [("botten".to_string(), "Connect this AI agent: fetch…".to_string())]);
+        assert_eq!(doing.logged_in, ["basecamp botten client-123 s3cret 222"], "the profile is named after the agent");
         assert_eq!(doing.servers[0], ("basecamp".to_string(), words(&["basecamp", "--profile", "botten", "mcp", "--account", "222"])));
+        assert!(doing.server_env[0]["XDG_CONFIG_HOME"].ends_with("/anna/tools"), "her Basecamp profile lives in her own folder");
+        assert!(source_env(&doing).ends_with("/anna/tools"));
+        assert!(doing.server_env[1].is_empty(), "a tool used as you runs with your own config");
         let (name, source) = &doing.sources[0];
         assert_eq!(name, "basecamp");
         assert!(source.anyone);
@@ -706,8 +750,25 @@ mod tests {
 
         assert_eq!(doing.servers, [("basecamp".to_string(), words(&["basecamp", "mcp", "--account", "111"]))]);
         assert!(doing.sources.is_empty());
-        assert!(doing.connected.is_empty());
+        assert!(doing.logged_in.is_empty());
         let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[test]
+    fn an_old_basecamp_is_told_so_and_nothing_is_changed() {
+        let mut asking = Scripted::answering(&["", "", "", "", "", "y", "y"]);
+        let mut doing = Pretend { installed: vec!["basecamp"], too_old_for_agents: true, ..Pretend::default() };
+        let config_dir = walk(&mut asking, &mut doing, "too-old");
+
+        assert!(asking.said.iter().any(|it| it.starts_with("TROUBLE This basecamp can't log in as an agent yet")));
+        assert!(!asking.asked.iter().any(|it| it.starts_with("Agent client")));
+        assert!(doing.logged_in.is_empty());
+        assert!(doing.servers.is_empty());
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    fn source_env(doing: &Pretend) -> String {
+        doing.sources[0].1.trigger.as_ref().unwrap().env["XDG_CONFIG_HOME"].clone()
     }
 
     #[test]
