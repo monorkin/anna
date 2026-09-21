@@ -13,7 +13,7 @@
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -41,20 +41,55 @@ const SWITCH_AT_PERCENT: f64 = 90.0;
 const SECONDS_BETWEEN_ACCOUNT_CHECKS: u64 = 60;
 const SECONDS_BEFORE_RESTARTING_A_TRIGGER: u64 = 10;
 const SECONDS_BETWEEN_LOOKS_AT_THE_CLOCK: u64 = 30;
+const MOST_TURNS_WAITING: usize = 50;
 
+/// What is waiting to be said in each conversation that has a turn going.
+/// A conversation's turns run one at a time and in the order they came: a
+/// "never mind" must not overtake what it takes back. One worker drains a
+/// conversation's queue and leaves when it is empty, so there are as many
+/// threads as there are busy conversations, not as many as there are
+/// messages.
 #[derive(Default)]
 struct Turns {
-    by_conversation: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    waiting: Mutex<HashMap<String, VecDeque<Turn>>>,
 }
 
+type Turn = Box<dyn FnOnce() + Send>;
+
 impl Turns {
-    fn of(&self, conversation: &str) -> Arc<Mutex<()>> {
-        self.by_conversation
-            .lock()
-            .unwrap()
-            .entry(conversation.to_string())
-            .or_default()
-            .clone()
+    fn add(self: &Arc<Turns>, conversation: &str, turn: Turn) {
+        let mut waiting = self.waiting.lock().unwrap();
+        match waiting.get_mut(conversation) {
+            Some(queue) if queue.len() >= MOST_TURNS_WAITING => {
+                logs::event("turn.dropped", json!({ "conversation": conversation, "waiting": queue.len() }));
+            }
+            Some(queue) => queue.push_back(turn),
+            None => {
+                waiting.insert(conversation.to_string(), VecDeque::new());
+                let turns = self.clone();
+                let conversation = conversation.to_string();
+                os_thread::spawn(move || turns.work_through(&conversation, turn));
+            }
+        }
+    }
+
+    fn work_through(&self, conversation: &str, first: Turn) {
+        let mut turn = first;
+        loop {
+            turn();
+            let mut waiting = self.waiting.lock().unwrap();
+            match waiting.get_mut(conversation).and_then(|queue| queue.pop_front()) {
+                Some(next) => turn = next,
+                None => {
+                    waiting.remove(conversation);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn busy_conversations(&self) -> usize {
+        self.waiting.lock().unwrap().len()
     }
 }
 
@@ -105,7 +140,7 @@ impl Controls for Running {
             "since": self.since,
             "process": std::process::id(),
             "sources": self.pokes.lock().unwrap().keys().collect::<Vec<_>>(),
-            "conversations": self.turns.by_conversation.lock().unwrap().len(),
+            "conversations": self.turns.busy_conversations(),
         })
     }
 
@@ -317,16 +352,18 @@ fn heard_as(people: &BTreeMap<String, String>, source: &Source, message: &Messag
 /// Wakes the conversation's thread on a thread of its own, after whatever
 /// turn that conversation already has running.
 fn wake_in_turn(runtime: &Arc<Runtime>, turns: &Arc<Turns>, conversation: Arc<dyn Conversation>, standing: Standing, said: String) {
-    let turn = turns.of(conversation.key());
     let runtime = runtime.clone();
+    let key = conversation.key().to_string();
 
-    os_thread::spawn(move || {
-        let _one_at_a_time = turn.lock().unwrap();
-        if let Err(error) = thread::wake(&runtime, conversation.clone(), standing, &said) {
-            logs::event("thread.failed", json!({ "conversation": conversation.key(), "error": format!("{error:#}") }));
-            let _ = conversation.say("Something broke on my side before I could finish this. I've logged it; ask me again and I'll pick it back up.");
-        }
-    });
+    turns.add(
+        &key,
+        Box::new(move || {
+            if let Err(error) = thread::wake(&runtime, conversation.clone(), standing, &said) {
+                logs::event("thread.failed", json!({ "conversation": conversation.key(), "error": format!("{error:#}") }));
+                let _ = conversation.say("Something broke on my side before I could finish this. I've logged it; ask me again and I'll pick it back up.");
+            }
+        }),
+    );
 }
 
 /// The clock Anna's threads set for themselves, and the post between them.
@@ -418,6 +455,43 @@ mod tests {
             args: vec!["-c".to_string(), script.to_string()],
             env: Default::default(),
         }
+    }
+
+    fn until(it_is_so: impl Fn() -> bool) {
+        for _ in 0..500 {
+            if it_is_so() {
+                return;
+            }
+            os_thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_conversations_turns_run_in_the_order_they_came_while_others_go_on() {
+        let turns = Arc::new(Turns::default());
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let (first_may_finish, waiting_to_finish) = mpsc::channel::<()>();
+
+        let record = ran.clone();
+        turns.add("card-1", Box::new(move || {
+            let _ = waiting_to_finish.recv();
+            record.lock().unwrap().push("card-1: do it".to_string());
+        }));
+        for said in ["card-1: never mind", "card-1: actually, do"] {
+            let record = ran.clone();
+            turns.add("card-1", Box::new(move || record.lock().unwrap().push(said.to_string())));
+        }
+
+        let (elsewhere_ran, elsewhere) = mpsc::channel();
+        turns.add("card-2", Box::new(move || elsewhere_ran.send(()).unwrap()));
+        elsewhere.recv_timeout(Duration::from_secs(5)).expect("another conversation waited on a busy one");
+        until(|| turns.busy_conversations() == 1);
+        assert_eq!(turns.busy_conversations(), 1, "card-2 is done and gone, card-1 is still held up");
+
+        first_may_finish.send(()).unwrap();
+        until(|| turns.busy_conversations() == 0);
+        assert_eq!(*ran.lock().unwrap(), ["card-1: do it", "card-1: never mind", "card-1: actually, do"]);
+        assert_eq!(turns.busy_conversations(), 0);
     }
 
     #[test]
