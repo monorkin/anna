@@ -151,11 +151,14 @@ source:
   This replaced the retry-with-backoff from the day before. Setup's "does this
   key work" asks Jev directly now — through the judge, a bad key passed,
   because haiku answered for it.
-- Basecamp agents log in with the command line's own agent login
-  (`auth login --with-client-credentials`, client ID and secret from
-  Adminland), under a profile named after the agent, in her tools folder.
-  Setup checks the installed basecamp has it and says so plainly when it
-  doesn't. The first version handed the terminal to Claude with the pasted
+- Basecamp agents are connected by the command line itself
+  (`basecamp auth agent connect`): it shows a link and a code, the person
+  approves the agent, and it keeps the credentials and mints its own tokens,
+  under a profile named after the agent, in her tools folder. Anna never sees
+  a client ID, a secret or a token, and knows nothing of Basecamp's OAuth.
+  When the installed basecamp is too old to connect agents, setup waits in
+  place: check again after updating, use Basecamp as you, or leave it for
+  now. The first version handed the terminal to Claude with the pasted
   instruction; run for real, it made `anna` the person's default Basecamp
   profile, stored their token under it, wrote credentials to
   `~/.basecamp-agent`, and tried to build the CLI from source. Setup doesn't
@@ -439,7 +442,7 @@ Next:
 
 1. Release katami and ax, and Anna herself, so there is an install line for
    the README.
-2. A basecamp CLI with the agent login (it is on its `main`, unreleased), then
+2. A basecamp CLI with `auth agent connect` (on its `main`, not in v0.11.0), then
    Anna as an agent in a real Basecamp account, end to end.
 3. The config as a ceiling: who may ask for what, the widest grant, a per-task
    budget.

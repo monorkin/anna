@@ -27,6 +27,9 @@ pub fn register(name: &str, command: &[String], env: BTreeMap<String, String>) -
     let mut config = Config::load()?;
     if let Some(existing) = config.mcp_servers.get(name) {
         settings.prose = existing.prose.clone();
+        if settings.env.is_empty() {
+            settings.env = existing.env.clone();
+        }
     }
     settings.fingerprint = Some(mcp::fingerprint_of(&settings).with_context(|| format!("{name} did not start"))?);
     config.mcp_servers.insert(name.to_string(), settings);
