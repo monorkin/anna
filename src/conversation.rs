@@ -14,6 +14,17 @@ pub struct Origin {
     pub conversation: String,
 }
 
+/// Whose word a turn runs on. Trusted people can change how the agent
+/// behaves and have it do things on the machine it runs on. Everyone else —
+/// where a source lets them in at all — can hand it work and nothing more.
+/// It is decided from the config when a message arrives, never by the thread,
+/// and it changes what the thread is able to do, not only what it is told.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Standing {
+    Trusted,
+    CanAssignWork,
+}
+
 pub trait Conversation: Send + Sync {
     fn key(&self) -> &str;
     fn origin(&self) -> Origin;

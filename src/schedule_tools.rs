@@ -21,7 +21,7 @@ use std::str::FromStr;
 
 use crate::broker::Tool;
 use crate::clock;
-use crate::conversation::Origin;
+use crate::conversation::{Origin, Standing};
 use crate::logs;
 use crate::store::Store;
 
@@ -72,6 +72,7 @@ fn shown(unix_seconds: i64) -> String {
 pub struct Schedule {
     pub database: PathBuf,
     pub origin: Origin,
+    pub standing: Standing,
 }
 
 impl Tool for Schedule {
@@ -112,7 +113,8 @@ impl Tool for Schedule {
             _ => bail!("give either cron or at, not both and not neither"),
         };
 
-        let id = store.add_schedule(&self.origin, cron, task, first_run, &clock::timestamp())?;
+        let trusted = self.standing == Standing::Trusted;
+        let id = store.add_schedule(&self.origin, cron, task, first_run, trusted, &clock::timestamp())?;
         logs::event("schedule.added", json!({ "schedule": id, "cron": cron, "first_run": shown(first_run) }));
         Ok(format!("Scheduled as number {id}. It first runs {}.", shown(first_run)))
     }
@@ -233,7 +235,7 @@ mod tests {
         let origin = Origin { source: "basecamp".to_string(), conversation: "card-1".to_string() };
         let elsewhere = Origin { source: "basecamp".to_string(), conversation: "card-2".to_string() };
 
-        let schedule = Schedule { database: database.clone(), origin: origin.clone() };
+        let schedule = Schedule { database: database.clone(), origin: origin.clone(), standing: Standing::CanAssignWork };
         assert!(schedule.call(&json!({ "task": "Check the queue", "cron": "0 9 * * 1-5" })).unwrap().contains("number 1"));
         assert!(schedule.call(&json!({ "task": "Too often", "cron": "* * * * *" })).is_err());
         assert!(schedule.call(&json!({ "task": "Neither" })).is_err());

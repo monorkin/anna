@@ -37,7 +37,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use usage::{Cli, Subcommands};
 
-use crate::conversation::Terminal;
+use crate::conversation::{Standing, Terminal};
 use crate::runtime::Runtime;
 
 /// A self-governing agent you work with like a colleague
@@ -183,7 +183,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Backup { to, without_secrets } => backup::backup(to, without_secrets),
         Command::Restore { path, force } => backup::restore(&path, force),
         Command::Chat { message, conversation } => {
-            thread::wake(&Runtime::start()?, Arc::new(Terminal::new(&conversation)), &message)
+            // Whoever is at this terminal can already do anything Anna can
+            thread::wake(&Runtime::start()?, Arc::new(Terminal::new(&conversation)), Standing::Trusted, &message)
         }
         Command::Log { follow } => logs::print(follow),
         Command::Mcp { command } => match command {

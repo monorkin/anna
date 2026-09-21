@@ -268,13 +268,14 @@ impl Wizard<'_> {
         }
 
         let trusted = self.trusted_people(tool, agent)?;
-        self.doing.add_source(tool.name, basecamp_source(&profile, &account.id, watches, trusted == 0))?;
+        let anyone = self.anyone_may_assign_work(tool, agent)?;
+        self.doing.add_source(tool.name, basecamp_source(&profile, &account.id, watches, anyone))?;
 
         self.asking.done(&format!("{agent} is in {} under its own profile, in {}.", tool.title, account.name))?;
-        if trusted == 0 {
-            self.asking.done(&format!("Nobody was named, so {agent} takes work from anyone who can reach it there."))?;
-        } else {
-            self.asking.done(&format!("{agent} takes work from the people you named, and ignores everyone else."))?;
+        match (trusted, anyone) {
+            (0, false) => self.asking.trouble(&format!("Nobody is trusted and nobody else may assign work, so {agent} won't act on anything in {}. Run setup again to change that.", tool.title))?,
+            (_, false) => self.asking.done(&format!("{agent} acts only on the people you named, and ignores everyone else."))?,
+            (_, true) => self.asking.done(&format!("Anyone who can reach {agent} there can hand it work; only the people you named can direct it."))?,
         }
         if watches {
             self.asking.done(&format!("{agent} hears about mentions and assignments the moment they happen."))
@@ -310,27 +311,36 @@ impl Wizard<'_> {
         Ok(())
     }
 
-    /// Who the agent takes work from. It acts on what these people ask and
-    /// ignores everyone else, however they reach it — the one decision about
-    /// authority that is made by a person, here, and looked up in code ever
-    /// after. Whoever is running setup is offered first.
+    /// Who the agent takes direction from: the people who can change how it
+    /// behaves and have it do things on the machine it runs on. It is the one
+    /// decision about authority that a person makes, here, and that is looked
+    /// up in code ever after. Whoever is running setup is offered first.
     fn trusted_people(&mut self, tool: &Tool, agent: &str) -> Result<usize> {
         let mut trusted = 0;
-        let hint = format!("{agent} acts on what trusted people ask, and on nobody else's word. They are matched by the email address {} reports.", tool.title);
+        let hint = format!("Trusted people can tell {agent} to change how it behaves, and to do things on this computer, like restarting it. They are matched by the email address {} reports.", tool.title);
 
         for address in self.doing.logged_in_as(tool.name) {
-            let question = format!("Should {agent} take work from {address}?");
+            let question = format!("Should {agent} trust {address}?");
             if self.asking.yes(&Question { title: "Trusted person", question: &question, hint: &hint }, true)? {
                 trusted += self.trust(agent, &address)?;
             }
         }
 
-        let question = format!("Who else should {agent} take work from in {}? Their email address.", tool.title);
+        let question = format!("Who else should {agent} trust in {}? Their email address.", tool.title);
         let last_hint = format!("{hint} Enter when there's nobody else.");
         while let Some(address) = self.asking.string(&Question { title: "Trusted person", question: &question, hint: &last_hint }, None)? {
             trusted += self.trust(agent, &address)?;
         }
         Ok(trusted)
+    }
+
+    /// Whether everyone else who can reach the agent may hand it work. For
+    /// them a turn runs with no shell and no way to write on this machine, so
+    /// the difference from a trusted person isn't only what the agent is told.
+    fn anyone_may_assign_work(&mut self, tool: &Tool, agent: &str) -> Result<bool> {
+        let question = format!("Should anyone in {} be able to assign {agent} work?", tool.title);
+        let hint = format!("People you didn't name can hand {agent} work and nothing more. For them it works only through sandboxed hands, with no shell on this computer, and it won't change how it behaves.");
+        self.asking.yes(&Question { title: "Work from anyone", question: &question, hint: &hint }, true)
     }
 
     fn trust(&mut self, agent: &str, address: &str) -> Result<usize> {
@@ -340,7 +350,7 @@ impl Wizard<'_> {
         let name = self.asking.string(&name_question, Some(&suggested))?.unwrap_or(suggested);
 
         self.doing.trust(address, &name)?;
-        self.asking.done(&format!("{agent} takes work from {name} ({address})."))?;
+        self.asking.done(&format!("{agent} trusts {name} ({address})."))?;
         Ok(1)
     }
 
@@ -393,9 +403,9 @@ More Claude subscriptions for {agent} to rotate between:
 /// makes one new is its id and when it went unread; the body is an excerpt,
 /// so the thread gets the title, the excerpt and the link to read the rest;
 /// and there is no single call that answers, so the thread answers with
-/// Basecamp's own tools. `anyone` is for when setup named no trusted people:
-/// Basecamp already decides who can reach an agent — the people in the
-/// projects it was added to — and then that is the only gate.
+/// Basecamp's own tools. `anyone` lets people who aren't trusted hand it
+/// work; Basecamp already decides who can reach an agent at all — the people
+/// in the projects it was added to.
 fn basecamp_source(profile: &str, account: &str, watches: bool, anyone: bool) -> Source {
     Source {
         server: "basecamp".to_string(),
@@ -770,6 +780,7 @@ mod tests {
             "2",                                       // the second account
             "y", "",                                   // trust whoever runs setup, under the suggested name
             "marta.k@example.com", "Marta K", "",      // and one more person
+            "n",                                       // nobody else may assign work
             "y", "y",                                  // HEY, confirm as me
         ]);
         let mut doing = Pretend { installed: vec!["basecamp", "hey"], watches: true, ..Pretend::default() };
@@ -793,7 +804,8 @@ mod tests {
             doing.trusted,
             [("me@basecamp.example.com".to_string(), "Me".to_string()), ("marta.k@example.com".to_string(), "Marta K".to_string())]
         );
-        assert!(!source.anyone, "with trusted people named, nobody else is heard");
+        assert!(!source.anyone, "nobody but the trusted people is heard");
+        assert!(asking.said.iter().any(|it| it.contains("acts only on the people you named")));
         assert_eq!(source.reply, None);
         assert_eq!(source.trigger.as_ref().unwrap().args, words(&["--profile", "botten", "watch", "--json", "--account", "222"]));
 
@@ -835,14 +847,27 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_with_nobody_named_takes_work_from_anyone_who_can_reach_it() {
-        let mut asking = Scripted::answering(&["", "", "", "", "", "y", "y", "client-123", "s3cret", "1", "n", ""]);
+    fn anyone_can_hand_an_agent_work_while_only_trusted_people_direct_it() {
+        let mut asking = Scripted::answering(&["", "", "", "", "", "y", "y", "client-123", "s3cret", "1", "y", "", "", ""]);
         let mut doing = Pretend { installed: vec!["basecamp"], ..Pretend::default() };
         let config_dir = walk(&mut asking, &mut doing, "anyone");
 
+        assert_eq!(doing.trusted.len(), 1);
+        assert!(doing.sources[0].1.anyone, "enter says yes: anyone may assign work");
+        assert!(asking.asked.iter().any(|it| it == "Work from anyone: Should anyone in Basecamp be able to assign Anna work?"));
+        assert!(asking.said.iter().any(|it| it.contains("only the people you named can direct it")));
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[test]
+    fn an_agent_that_would_hear_nobody_is_pointed_out() {
+        let mut asking = Scripted::answering(&["", "", "", "", "", "y", "y", "client-123", "s3cret", "1", "n", "", "n"]);
+        let mut doing = Pretend { installed: vec!["basecamp"], ..Pretend::default() };
+        let config_dir = walk(&mut asking, &mut doing, "nobody");
+
         assert!(doing.trusted.is_empty());
-        assert!(doing.sources[0].1.anyone);
-        assert!(asking.said.iter().any(|it| it.contains("takes work from anyone who can reach it")));
+        assert!(!doing.sources[0].1.anyone);
+        assert!(asking.said.iter().any(|it| it.starts_with("TROUBLE Nobody is trusted and nobody else may assign work")));
         let _ = std::fs::remove_dir_all(config_dir);
     }
 

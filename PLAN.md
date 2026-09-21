@@ -52,12 +52,29 @@ source:
   service with lingering; Jev, and the key typed without echo and checked
   before it is kept. Then one block per tool whose command line is installed:
   Basecamp, HEY, Fizzy. It closes with how to add any MCP server.
-- Basecamp's and Fizzy's blocks ask who the agent takes work from. Whoever is
-  running setup is offered first (enter says yes), then anyone else by email,
-  each with a name suggested from the address. They go into `people`. For a
-  Basecamp agent that settles who is heard: with people named, only them;
-  with nobody named, anyone who can reach the agent there. HEY doesn't ask —
-  anyone can write to an inbox, so there is nobody to name.
+- Two standings, decided in code when a message arrives. **Trusted** people
+  — `people` in the config — can change how the agent behaves and have it do
+  things on the machine it runs on. **Everyone else**, on a source with
+  `anyone`, can hand it work and nothing more. The difference isn't only what
+  the thread is told: a turn on an untrusted word runs with `--tools
+  Read,Grep,Glob`, so it has no shell and can't write on the host — a reboot
+  or an edit to its own config isn't refused, it isn't there — while the
+  broker's tools stay, so the work still gets done by hands in their
+  sandboxes. A schedule keeps the standing of the turn that made it, so
+  nobody schedules their way up. What one thread tells another always arrives
+  untrusted. `anna chat` is trusted: whoever is at the terminal can already do
+  anything she can. Run live: the same "run this command on your machine"
+  from someone untrusted did nothing and was answered with why; from someone
+  trusted it ran.
+  Not closed: an untrusted person's words stay in the conversation's history,
+  and a later trusted turn in the same conversation reads them. And katami
+  still learns "preferences" from whoever spoke, until it knows speakers.
+- Setup asks both, in Basecamp's and Fizzy's blocks: who is trusted — whoever
+  is running setup is offered first, then anyone else by email, with a name
+  suggested from the address — and whether anyone else may assign work (enter
+  says yes). Trusting nobody and letting nobody assign work is pointed out,
+  since the agent would then act on nothing. HEY doesn't ask: anyone can
+  write to an inbox.
 - A tool is given to the agent as itself or as you, and only the first
   listens. As a Basecamp agent it gets its own CLI profile, the verified
   Basecamp source with `anyone: true` — Basecamp already decides who can reach

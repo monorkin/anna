@@ -16,7 +16,7 @@ use std::path::Path;
 
 use crate::conversation::Origin;
 
-const MIGRATIONS: [&str; 1] = ["
+const MIGRATIONS: [&str; 2] = ["
     CREATE TABLE schedules (
         id INTEGER PRIMARY KEY,
         source TEXT NOT NULL,
@@ -48,6 +48,8 @@ const MIGRATIONS: [&str; 1] = ["
         sent INTEGER NOT NULL,
         delivered INTEGER
     );
+", "
+    ALTER TABLE schedules ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0;
 "];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +60,10 @@ pub struct Schedule {
     pub cron: Option<String>,
     pub task: String,
     pub next_run: i64,
+    /// Whether the turn that set it up ran on a trusted person's word. It
+    /// runs with that standing and no more, so nobody schedules their way to
+    /// something they couldn't ask for directly.
+    pub trusted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -118,10 +124,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn add_schedule(&self, origin: &Origin, cron: Option<&str>, task: &str, next_run: i64, created: &str) -> Result<i64> {
+    pub fn add_schedule(&self, origin: &Origin, cron: Option<&str>, task: &str, next_run: i64, trusted: bool, created: &str) -> Result<i64> {
         self.connection.execute(
-            "INSERT INTO schedules (source, conversation, cron, task, next_run, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![origin.source, origin.conversation, cron, task, next_run, created],
+            "INSERT INTO schedules (source, conversation, cron, task, next_run, trusted, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![origin.source, origin.conversation, cron, task, next_run, trusted, created],
         )?;
         Ok(self.connection.last_insert_rowid())
     }
@@ -156,7 +162,7 @@ impl Store {
 
     fn schedules_where(&self, condition: &str, values: &[&dyn rusqlite::ToSql]) -> Result<Vec<Schedule>> {
         let mut statement = self.connection.prepare(&format!(
-            "SELECT id, source, conversation, cron, task, next_run FROM schedules WHERE {condition} ORDER BY next_run, id"
+            "SELECT id, source, conversation, cron, task, next_run, trusted FROM schedules WHERE {condition} ORDER BY next_run, id"
         ))?;
         let schedules = statement
             .query_map(values, |row| {
@@ -166,6 +172,7 @@ impl Store {
                     cron: row.get(3)?,
                     task: row.get(4)?,
                     next_run: row.get(5)?,
+                    trusted: row.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -280,8 +287,10 @@ mod tests {
     #[test]
     fn schedules_come_due_move_on_and_belong_to_whoever_made_them() {
         let (store, directory) = store("schedules");
-        let daily = store.add_schedule(&origin("card-1"), Some("0 9 * * *"), "Check the deploy", 1_000, "now").unwrap();
-        let once = store.add_schedule(&origin("card-2"), None, "Remind Marta", 2_000, "now").unwrap();
+        let daily = store.add_schedule(&origin("card-1"), Some("0 9 * * *"), "Check the deploy", 1_000, true, "now").unwrap();
+        let once = store.add_schedule(&origin("card-2"), None, "Remind Marta", 2_000, false, "now").unwrap();
+        assert!(store.schedules_of(&origin("card-1")).unwrap()[0].trusted);
+        assert!(!store.schedules_of(&origin("card-2")).unwrap()[0].trusted);
 
         assert_eq!(store.schedules_due(999).unwrap(), []);
         assert_eq!(store.schedules_due(1_500).unwrap().iter().map(|it| it.id).collect::<Vec<_>>(), [daily]);
