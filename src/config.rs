@@ -117,6 +117,26 @@ pub struct Source {
     /// catch what the trigger missed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<Trigger>,
+    /// For a source that is read from a position rather than as a list of
+    /// what is unread: where the position is in an answer, and where it goes
+    /// in the next call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Cursor>,
+    /// Said to the thread with every message from here, for a source whose
+    /// messages aren't what someone wrote but a pointer to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Two JSON pointers: `from` into the watch tool's answer, `into` into its
+/// arguments. The first call goes out as written, which for such a source
+/// means "from now"; every later one carries the position the last answer
+/// gave. It is kept on disk, so what arrived while Anna was down is there
+/// when she comes back.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Cursor {
+    pub from: String,
+    pub into: String,
 }
 
 /// One JSON pointer, or several whose values belong together.

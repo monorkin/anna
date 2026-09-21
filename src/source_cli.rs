@@ -7,7 +7,7 @@ use crate::config::{self, Config};
 use crate::editor::Editor;
 use crate::judge::Judge;
 use crate::mcp::Catalog;
-use crate::source;
+use crate::source::{self, Position};
 
 const LONGEST_SHOWN: usize = 70;
 
@@ -26,10 +26,18 @@ pub fn check(name: &str) -> Result<()> {
     let editor = Arc::new(Editor::new(config::style()?, judge.clone()));
     let catalog = Catalog::open(&config, editor, judge);
 
-    let answer = catalog.call(&source.server, &source.watch.tool, &source.watch.arguments)?;
+    // Read from where she has got to, and the position left where it is
+    let arguments = match Position::of(name, source) {
+        Some(position) => position.in_arguments(&source.watch.arguments),
+        None => source.watch.arguments.clone(),
+    };
+    let answer = catalog.call(&source.server, &source.watch.tool, &arguments)?;
     let messages = source::messages_in(source, &answer)?;
 
     println!("{} messages found in {} bytes of answer.", messages.len(), answer.len());
+    if source.cursor.is_some() && messages.is_empty() {
+        println!("This source is read from a position, so an empty answer is the usual one: it holds what arrived since she last looked.");
+    }
     for message in &messages {
         let listened_to = match config.people.get(&message.sender) {
             Some(person) => format!("listens to: {person}"),

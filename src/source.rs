@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::config::{Call, Pointers, Source};
+use crate::config::{Call, Cursor, Pointers, Source};
 use crate::conversation::{Conversation, Origin};
 use crate::fsutil;
 use crate::logs;
@@ -59,12 +59,68 @@ fn all_at(item: &Value, pointers: &Pointers, separator: &str) -> Option<String> 
     }
 }
 
+/// Text and numbers as they are; anything with structure — an event's
+/// details, say — as the JSON it is, since a thread reads that fine.
 fn text_at(item: &Value, pointer: &str) -> Option<String> {
     match item.pointer(pointer)? {
         Value::String(text) => Some(text.clone()),
         Value::Number(number) => Some(number.to_string()),
-        _ => None,
+        Value::Null | Value::Bool(_) => None,
+        structured => Some(structured.to_string()),
     }
+}
+
+/// Where a source that is read from a position has got to.
+pub struct Position {
+    path: PathBuf,
+    cursor: Cursor,
+}
+
+impl Position {
+    pub fn of(source_name: &str, source: &Source) -> Option<Position> {
+        let cursor = source.cursor.clone()?;
+        Some(Position { path: paths::source_dir(source_name).join("position"), cursor })
+    }
+
+    /// The watch arguments, with the position put where the source wants it
+    /// when there is one. The folders on the way are made: `/params/position`
+    /// works whether or not the arguments already have `params`.
+    pub fn in_arguments(&self, arguments: &Value) -> Value {
+        match fs::read_to_string(&self.path) {
+            Ok(position) if !position.trim().is_empty() => put_at(arguments, &self.cursor.into, position.trim()),
+            _ => arguments.clone(),
+        }
+    }
+
+    /// Only once everything in the answer has been handed on: a position
+    /// moved first would lose the messages of a look that then failed.
+    pub fn move_to_where(&self, answer: &str) -> Result<()> {
+        let answer: Value = serde_json::from_str(answer).context("the watch tool did not answer with JSON")?;
+        match text_at(&answer, &self.cursor.from) {
+            Some(position) => fsutil::write_private(&self.path, &position),
+            None => Ok(()),
+        }
+    }
+}
+
+fn put_at(arguments: &Value, pointer: &str, value: &str) -> Value {
+    let mut arguments = arguments.clone();
+    if !arguments.is_object() {
+        arguments = json!({});
+    }
+
+    let names: Vec<&str> = pointer.split('/').skip(1).collect();
+    let mut place = &mut arguments;
+    for name in &names[..names.len().saturating_sub(1)] {
+        if !place[*name].is_object() {
+            place[*name] = json!({});
+        }
+        place = &mut place[*name];
+    }
+    if let Some(last) = names.last() {
+        place[*last] = Value::from(value);
+    }
+    arguments
 }
 
 /// The ids of messages already handled, kept on disk so a restart doesn't
@@ -317,6 +373,47 @@ mod tests {
         assert_ne!(key_part("thread/7"), key_part("thread.7"));
         assert_eq!(key_part(&sgid).len(), 12 + 1 + 16);
         assert_ne!(key_part(&sgid), key_part(&format!("{sgid}x")));
+    }
+
+    #[test]
+    fn a_source_read_from_a_position_carries_it_into_the_next_call() {
+        let inbox: Source = serde_json::from_value(json!({
+            "server": "basecamp",
+            "watch": { "tool": "basecamp_eventfeed", "arguments": { "action": "poll_inbox", "params": {} } },
+            "items": "/items",
+            "id": "/addressing_id",
+            "conversation": "/event/recording_id",
+            "sender": "/event/creator_id",
+            "text": ["/reason", "/event/kind", "/event/bucket_id", "/event/recording_id", "/event/details"],
+            "cursor": { "from": "/position", "into": "/params/position" },
+        }))
+        .unwrap();
+        let answer = json!({
+            "items": [{
+                "addressing_id": 71, "reason": "mentioned", "addressed_at": "2026-09-21T18:00:00Z",
+                "event": { "id": 9001, "kind": "comment_created", "bucket_id": 2, "creator_id": 1001, "recording_id": 3, "details": { "excerpt": "Can you look?" } },
+            }],
+            "position": "p-71",
+        })
+        .to_string();
+
+        let message = messages_in(&inbox, &answer).unwrap().remove(0);
+        assert_eq!(message.id, "71");
+        assert_eq!(message.sender, "1001", "people are reported by id");
+        assert_eq!(message.conversation, "3");
+        assert_eq!(message.text, "mentioned\n\ncomment_created\n\n2\n\n3\n\n{\"excerpt\":\"Can you look?\"}");
+
+        let path = std::env::temp_dir().join(format!("anna-position-{}/position", std::process::id()));
+        let position = Position { path: path.clone(), cursor: inbox.cursor.clone().unwrap() };
+        assert_eq!(position.in_arguments(&inbox.watch.arguments), inbox.watch.arguments, "the first call goes out as written: from now");
+
+        position.move_to_where(&answer).unwrap();
+        assert_eq!(position.in_arguments(&inbox.watch.arguments), json!({ "action": "poll_inbox", "params": { "position": "p-71" } }));
+        assert_eq!(position.in_arguments(&json!({ "action": "poll_inbox" }))["params"]["position"], "p-71", "the way there is made when it's missing");
+
+        position.move_to_where(&json!({ "items": [] }).to_string()).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "p-71", "an answer without a position leaves her where she was");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

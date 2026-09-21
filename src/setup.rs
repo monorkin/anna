@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use crate::config::{self, Call, Config, Pointers, Source, Trigger};
+use crate::config::{self, Call, Config, Cursor, Pointers, Source, Trigger};
 use crate::fsutil;
 use crate::judge::Judge;
 use crate::mcp_cli;
@@ -79,6 +79,9 @@ trait Doing {
     fn install_service(&mut self, agent: &str) -> Result<()>;
     /// Who the tool's command line is logged in as, for the confirm question.
     fn logged_in_as(&mut self, tool: &str) -> Vec<String>;
+    /// The ids the tool knows someone by, in every account the person
+    /// running setup can see. Empty when it knows nobody by that address.
+    fn person_ids(&mut self, tool: &str, address: &str) -> Vec<String>;
     fn accounts(&mut self, tool: &str, profile: Option<&str>) -> Result<Vec<Account>>;
     fn can_connect_agents(&mut self, tool: &str) -> bool;
     /// Hands the terminal to the tool's own command line until the agent is
@@ -88,6 +91,14 @@ trait Doing {
     fn add_server(&mut self, name: &str, command: &[String], env: BTreeMap<String, String>) -> Result<()>;
     fn add_source(&mut self, name: &str, source: Source) -> Result<()>;
     fn trust(&mut self, address: &str, name: &str) -> Result<()>;
+}
+
+/// What a source reports its senders as, which is what `people` has to be
+/// keyed by.
+#[derive(Clone, Copy)]
+enum RecognizedBy {
+    Address,
+    PersonId,
 }
 
 enum GoOn {
@@ -282,7 +293,7 @@ impl Wizard<'_> {
             return self.asking.trouble(&format!("Couldn't add the {} server: {error:#}", tool.title));
         }
 
-        let trusted = self.trusted_people(tool, agent)?;
+        let trusted = self.trusted_people(tool, agent, RecognizedBy::PersonId)?;
         let anyone = self.anyone_may_assign_work(tool, agent)?;
         self.doing.add_source(tool.name, basecamp_source(&profile, watches, anyone))?;
 
@@ -321,7 +332,7 @@ impl Wizard<'_> {
         self.asking.done(&format!("{agent} can use {} as {who}.", tool.title))?;
 
         if tool.asks_who_to_trust {
-            self.trusted_people(tool, agent)?;
+            self.trusted_people(tool, agent, RecognizedBy::Address)?;
         }
         Ok(())
     }
@@ -330,21 +341,21 @@ impl Wizard<'_> {
     /// behaves and have it do things on the machine it runs on. It is the one
     /// decision about authority that a person makes, here, and that is looked
     /// up in code ever after. Whoever is running setup is offered first.
-    fn trusted_people(&mut self, tool: &Tool, agent: &str) -> Result<usize> {
+    fn trusted_people(&mut self, tool: &Tool, agent: &str, recognized_by: RecognizedBy) -> Result<usize> {
         let mut trusted = 0;
-        let hint = format!("Trusted people can tell {agent} to change how it behaves, and to do things on this computer, like restarting it. They are matched by the email address {} reports.", tool.title);
+        let hint = format!("Trusted people can tell {agent} to change how it behaves, and to do things on this computer, like restarting it. They are found in {} by their email address.", tool.title);
 
         for address in self.doing.logged_in_as(tool.name) {
             let question = format!("Should {agent} trust {address}?");
             if self.asking.yes(&Question { title: "Trusted person", question: &question, hint: &hint }, true)? {
-                trusted += self.trust(agent, &address)?;
+                trusted += self.trust(tool, agent, &address, recognized_by)?;
             }
         }
 
         let question = format!("Who else should {agent} trust in {}? Their email address.", tool.title);
         let last_hint = format!("{hint} Enter when there's nobody else.");
         while let Some(address) = self.asking.string(&Question { title: "Trusted person", question: &question, hint: &last_hint }, None)? {
-            trusted += self.trust(agent, &address)?;
+            trusted += self.trust(tool, agent, &address, recognized_by)?;
         }
         Ok(trusted)
     }
@@ -358,13 +369,27 @@ impl Wizard<'_> {
         self.asking.yes(&Question { title: "Work from anyone", question: &question, hint: &hint }, true)
     }
 
-    fn trust(&mut self, agent: &str, address: &str) -> Result<usize> {
+    /// Someone is trusted as whatever the source will report them as. Where
+    /// that is an id and not their address, the id is looked up now: a person
+    /// the tool doesn't know would be trusted on paper and never recognized.
+    fn trust(&mut self, tool: &Tool, agent: &str, address: &str, recognized_by: RecognizedBy) -> Result<usize> {
+        let reported_as = match recognized_by {
+            RecognizedBy::Address => vec![address.to_string()],
+            RecognizedBy::PersonId => self.doing.person_ids(tool.name, address),
+        };
+        if reported_as.is_empty() {
+            self.asking.trouble(&format!("Couldn't find {address} in {}, so {agent} wouldn't recognize them. Nobody was added.", tool.title))?;
+            return Ok(0);
+        }
+
         let suggested = name_from(address);
         let question = format!("What should {agent} call them?");
         let name_question = Question { title: "Their name", question: &question, hint: "How the agent refers to this person." };
         let name = self.asking.string(&name_question, Some(&suggested))?.unwrap_or(suggested);
 
-        self.doing.trust(address, &name)?;
+        for reported in &reported_as {
+            self.doing.trust(reported, &name)?;
+        }
         self.asking.done(&format!("{agent} trusts {name} ({address})."))?;
         Ok(1)
     }
@@ -413,27 +438,35 @@ More Claude subscriptions for {agent} to rotate between:
     }
 }
 
-/// What Basecamp's notifications look like, worked out against the real
-/// thing: the same notification is bumped for every new comment, so what
-/// makes one new is its id and when it went unread; the body is an excerpt,
-/// so the thread gets the title, the excerpt and the link to read the rest;
-/// and there is no single call that answers, so the thread answers with
-/// Basecamp's own tools. `anyone` lets people who aren't trusted hand it
-/// work; Basecamp already decides who can reach an agent at all — the people
-/// in the projects it was added to.
+const BASECAMP_INBOX_NOTE: &str = "That is an item from your Basecamp inbox, not what they wrote. Its lines are, in order: why it reached you, the kind of event, the project (bucket) id, the recording id, and the event's details when it has any. Read the recording with your Basecamp tools before you do anything, and answer where it was said, with those tools.";
+
+/// How an agent hears things in Basecamp. It has no notifications — Basecamp
+/// refuses an agent everything it hasn't opened to agents, the "Hey!" menu
+/// included — and gets an inbox of its own instead: every event that reached
+/// it, with why (mentioned, assigned, pinged, subscribed…). The inbox is
+/// read from a position, and an item is an event, not what someone wrote: it
+/// says who, in which project and on which recording, so the thread is told
+/// to read the recording before it acts. People are reported by id, which
+/// is why the trusted ones were looked up when they were named. There is no
+/// single call that answers, so the thread answers with Basecamp's own
+/// tools. `anyone` lets people who aren't trusted hand it work; Basecamp
+/// already decides who can reach an agent at all — the people in the
+/// projects it was added to.
 fn basecamp_source(profile: &str, watches: bool, anyone: bool) -> Source {
     Source {
         server: "basecamp".to_string(),
-        watch: Call { tool: "basecamp_account".to_string(), arguments: json!({ "action": "get_my_notifications" }) },
+        watch: Call { tool: "basecamp_eventfeed".to_string(), arguments: json!({ "action": "poll_inbox", "params": {} }) },
         every_seconds: if watches { 900 } else { 60 },
-        items: "/unreads".to_string(),
-        id: Pointers::Several(vec!["/id".to_string(), "/unread_at".to_string()]),
-        conversation: "/readable_sgid".to_string(),
-        sender: "/creator/email_address".to_string(),
-        sender_name: Some("/creator/name".to_string()),
+        items: "/items".to_string(),
+        id: Pointers::One("/addressing_id".to_string()),
+        conversation: "/event/recording_id".to_string(),
+        sender: "/event/creator_id".to_string(),
+        sender_name: None,
         anyone,
-        text: Pointers::Several(vec!["/title".to_string(), "/content_excerpt".to_string(), "/app_url".to_string()]),
+        text: Pointers::Several(words(&["/reason", "/event/kind", "/event/bucket_id", "/event/recording_id", "/event/details"])),
         reply: None,
+        cursor: Some(Cursor { from: "/position".to_string(), into: "/params/position".to_string() }),
+        note: Some(BASECAMP_INBOX_NOTE.to_string()),
         trigger: if watches {
             Some(Trigger {
                 command: "basecamp".to_string(),
@@ -526,6 +559,21 @@ impl Doing for Machine {
             .filter_map(|it| it.as_str())
             .filter(|it| !it.is_empty())
             .map(String::from)
+            .collect()
+    }
+
+    /// Asked as the person running setup, who can see people; an agent
+    /// can't. Every account they are in is looked through, since which one
+    /// the agent belongs to is the command line's to know, and an id is only
+    /// ever one person's.
+    fn person_ids(&mut self, tool: &str, address: &str) -> Vec<String> {
+        let accounts = self.accounts(tool, None).unwrap_or_default();
+        accounts
+            .iter()
+            .filter_map(|account| json_from(tool, &["people", "list", "--all", "--json", "--account", &account.id]))
+            .flat_map(|listed| listed["data"].as_array().cloned().unwrap_or_default())
+            .filter(|person| person["email_address"].as_str().is_some_and(|it| it.eq_ignore_ascii_case(address)))
+            .map(|person| person["id"].to_string().trim_matches('"').to_string())
             .collect()
     }
 
@@ -733,6 +781,14 @@ mod tests {
             vec![format!("me@{tool}.example.com")]
         }
 
+        fn person_ids(&mut self, _tool: &str, address: &str) -> Vec<String> {
+            match address {
+                "me@basecamp.example.com" => vec!["1001".to_string()],
+                "marta.k@example.com" => vec!["1002".to_string(), "2002".to_string()],
+                _ => Vec::new(),
+            }
+        }
+
         fn accounts(&mut self, _tool: &str, _profile: Option<&str>) -> Result<Vec<Account>> {
             Ok(vec![
                 Account { id: "111".to_string(), name: "Work".to_string() },
@@ -817,8 +873,13 @@ mod tests {
         assert_eq!(name, "basecamp");
         assert_eq!(
             doing.trusted,
-            [("me@basecamp.example.com".to_string(), "Me".to_string()), ("marta.k@example.com".to_string(), "Marta K".to_string())]
+            [("1001".to_string(), "Me".to_string()), ("1002".to_string(), "Marta K".to_string()), ("2002".to_string(), "Marta K".to_string())],
+            "an agent's inbox reports people by id, so that is what they are trusted as — in every account they are in"
         );
+        assert_eq!(source.watch.arguments, json!({ "action": "poll_inbox", "params": {} }), "an agent has an inbox, not notifications");
+        assert_eq!(source.sender, "/event/creator_id");
+        assert_eq!(source.cursor, Some(Cursor { from: "/position".to_string(), into: "/params/position".to_string() }));
+        assert!(source.note.as_ref().unwrap().contains("Read the recording"));
         assert!(!source.anyone, "nobody but the trusted people is heard");
         assert!(asking.said.iter().any(|it| it.contains("acts only on the people you named")));
         assert_eq!(source.reply, None);
@@ -883,6 +944,18 @@ mod tests {
         assert!(doing.trusted.is_empty());
         assert!(!doing.sources[0].1.anyone);
         assert!(asking.said.iter().any(|it| it.starts_with("TROUBLE Nobody is trusted and nobody else may assign work")));
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[test]
+    fn someone_basecamp_does_not_know_is_not_trusted_on_paper() {
+        let mut asking = Scripted::answering(&["", "", "", "", "", "y", "y", "n", "ghost@example.com", "", "n"]);
+        let mut doing = Pretend { installed: vec!["basecamp"], ..Pretend::default() };
+        let config_dir = walk(&mut asking, &mut doing, "ghost");
+
+        assert!(doing.trusted.is_empty());
+        assert!(asking.said.iter().any(|it| it.starts_with("TROUBLE Couldn't find ghost@example.com in Basecamp")));
+        assert!(!asking.asked.iter().any(|it| it.starts_with("Their name")), "nobody is named who couldn't be found");
         let _ = std::fs::remove_dir_all(config_dir);
     }
 

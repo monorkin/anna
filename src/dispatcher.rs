@@ -33,7 +33,7 @@ use crate::logs;
 use crate::paths;
 use crate::runtime::Runtime;
 use crate::schedule_tools;
-use crate::source::{self, Message, Seen, Sourced};
+use crate::source::{self, Message, Position, Seen, Sourced};
 use crate::store::Store;
 use crate::thread;
 
@@ -284,17 +284,31 @@ fn listen(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Sourc
 }
 
 fn check(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Source, seen: &mut Seen) -> Result<()> {
-    let answer = runtime.catalog.call(&source.server, &source.watch.tool, &source.watch.arguments)?;
+    let position = Position::of(name, source);
+    let arguments = match &position {
+        Some(position) => position.in_arguments(&source.watch.arguments),
+        None => source.watch.arguments.clone(),
+    };
+    let answer = runtime.catalog.call(&source.server, &source.watch.tool, &arguments)?;
 
+    let mut held_back = false;
     for message in source::messages_in(source, &answer)? {
         if seen.is_new(&message.id) {
             let id = message.id.clone();
             if dispatch(runtime, turns, name, source, message) == Dispatched::NotYet {
                 seen.forget(&id);
+                held_back = true;
             }
         }
     }
-    seen.save()
+    seen.save()?;
+
+    // A message that couldn't be checked has to come round again, and with
+    // a position it only does if the position stays where it is
+    match position {
+        Some(position) if !held_back => position.move_to_where(&answer),
+        _ => Ok(()),
+    }
 }
 
 #[derive(PartialEq)]
@@ -329,6 +343,10 @@ fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Sou
     let said = match standing {
         Standing::Trusted => format!("{person}, who you take direction from, says on {name}:\n\n{}", message.text),
         Standing::CanAssignWork => format!("{person}, who can give you work but isn't someone you take direction from, says on {name}:\n\n{}", message.text),
+    };
+    let said = match &source.note {
+        Some(note) => format!("{said}\n\n{note}"),
+        None => said,
     };
     wake_in_turn(runtime, turns, conversation, standing, said);
     Dispatched::Done
