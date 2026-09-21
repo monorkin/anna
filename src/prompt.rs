@@ -220,8 +220,10 @@ fn editor() -> Option<String> {
 }
 
 fn written_in(editor: &str, starting_with: &str) -> Result<Option<String>> {
-    let path = std::env::temp_dir().join(format!("anna-setup-{}.md", std::process::id()));
-    std::fs::write(&path, starting_with)?;
+    // In her own folder, not the one everybody shares: what is written here
+    // becomes who she is, and a file someone else could swap is theirs to write
+    let path = crate::paths::config_dir().join(format!(".editing-{}.md", std::process::id()));
+    crate::fsutil::write_private(&path, starting_with)?;
 
     let mut words = editor.split_whitespace();
     let program = words.next().context("EDITOR is empty")?;

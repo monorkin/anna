@@ -51,6 +51,20 @@ pub fn claim_own_state() {
         env::set_var("KATAMI_DATA_DIR", memory_dir());
         env::set_var("AX_DATA_DIR", accounts_dir());
     }
+    keep_to_herself(&config_dir());
+    keep_to_herself(&data_dir());
+}
+
+/// Her folders are closed to everyone else at the top, every time she
+/// starts. What is inside — logs, sessions, the database, her tools' logins —
+/// is then out of reach whatever mode a single file was made with, and an
+/// Anna set up before this was done is closed too.
+fn keep_to_herself(directory: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if make_private_dir(directory).is_ok() {
+        let _ = std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700));
+    }
 }
 
 pub fn database() -> PathBuf {

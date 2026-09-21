@@ -4,8 +4,9 @@
 //! shouldn't take a thread down with it.
 
 use serde_json::{Value, json};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::thread;
 use std::time::Duration;
 
@@ -17,12 +18,14 @@ pub fn event(name: &str, details: Value) {
         return;
     }
     let path = paths::log_file();
+    // Who wrote to her, which tools she called and what went wrong are
+    // nobody else's to read
     if let Some(directory) = path.parent() {
-        if fs::create_dir_all(directory).is_err() {
+        if paths::make_private_dir(directory).is_err() {
             return;
         }
     }
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).mode(0o600).open(path) {
         let line = json!({ "at": clock::timestamp(), "event": name, "details": details });
         let _ = writeln!(file, "{line}");
     }

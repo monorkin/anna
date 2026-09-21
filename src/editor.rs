@@ -56,7 +56,9 @@ impl Editor {
             logs::event("editor.rewrote", json!({ "from": text.len(), "to": rewrite.len(), "unfaithfulness": unfaithfulness }));
             Ok(rewrite)
         } else {
-            logs::event("editor.rejected", json!({ "unfaithfulness": unfaithfulness, "original": text, "rewrite": rewrite }));
+            // Sizes, not the texts: the log is kept and backed up, and what
+            // she writes to people doesn't belong in it
+            logs::event("editor.rejected", json!({ "unfaithfulness": unfaithfulness, "from": text.len(), "to": rewrite.len() }));
             bail!(
                 "This wasn't sent. It doesn't follow the style below, and it couldn't be restyled without changing what it says. Rewrite it yourself and send it again.\n\n{style}"
             )
