@@ -17,6 +17,7 @@ use katami::supervisor::Supervision;
 use serde_json::json;
 use std::fs::{self, File};
 use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -63,6 +64,7 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
     let key = conversation.key().to_string();
     let directory = paths::thread_dir(&key);
     fs::create_dir_all(&directory)?;
+    let _one_turn_at_a_time = wait_for_the_conversation(&directory)?;
 
     let hands = Arc::new(Hands::default());
     let workshop = Arc::new(Workshop {
@@ -121,6 +123,19 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
             }
             None => Err(error.context(format!("the thread for {key} could not finish its turn"))),
         },
+    }
+}
+
+/// One turn at a time in a conversation, across processes: the dispatcher
+/// queues its own turns, but `anna chat` is another process, and two turns
+/// resuming one session would each write over what the other said. The
+/// kernel drops the lock with the process, so a crash can't leave one held.
+fn wait_for_the_conversation(directory: &Path) -> Result<File> {
+    let lock = File::create(directory.join("turn.lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } == 0 {
+        Ok(lock)
+    } else {
+        Err(std::io::Error::last_os_error().into())
     }
 }
 

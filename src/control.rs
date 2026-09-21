@@ -13,8 +13,10 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::fs;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::thread;
@@ -28,11 +30,33 @@ pub trait Controls: Send + Sync {
     fn stop(&self);
 }
 
+/// Being the one Anna here. Taken before anything is started or swept, and
+/// held by the kernel for as long as the process lives, so two that start
+/// at the same moment can't both win and a crash leaves nothing to clean up.
+pub struct OnlyOne {
+    _lock: File,
+}
+
+pub fn be_the_only_one() -> Result<OnlyOne> {
+    let path = paths::runtime_dir().join("anna.lock");
+    paths::make_private_dir(&paths::runtime_dir())?;
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("could not open {}", path.display()))?;
+
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        Ok(OnlyOne { _lock: lock })
+    } else {
+        bail!("Anna is already running")
+    }
+}
+
 pub fn serve(controls: Arc<dyn Controls>) -> Result<()> {
     let socket = paths::control_socket();
-    if UnixStream::connect(&socket).is_ok() {
-        bail!("Anna is already running");
-    }
     if let Some(directory) = socket.parent() {
         paths::make_private_dir(directory)?;
     }

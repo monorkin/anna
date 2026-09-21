@@ -59,6 +59,7 @@ impl Turns {
 }
 
 pub fn run() -> Result<()> {
+    let _only_one = control::be_the_only_one()?;
     let runtime = Arc::new(Runtime::start()?);
     let turns = Arc::new(Turns::default());
     let mut pokes = HashMap::new();
