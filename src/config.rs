@@ -156,6 +156,18 @@ fn default_interval() -> u64 {
     60
 }
 
+/// Stands for the folder her tools keep their config in, in an `env` value.
+/// The config is written once and the folder follows her: a backup restored
+/// under another home, or on another machine, still points its tools at
+/// where their logins now are.
+pub const HER_TOOLS: &str = "{tools}";
+
+/// An `env` map as the program it is for gets it.
+pub fn environment(written: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let tools = paths::tools_config_home().to_string_lossy().into_owned();
+    written.iter().map(|(name, value)| (name.clone(), value.replace(HER_TOOLS, &tools))).collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct McpServer {
     pub command: String,

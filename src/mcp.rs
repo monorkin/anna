@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::broker::Tool;
-use crate::config::{Config, McpServer};
+use crate::config::{self, Config, McpServer};
 use crate::editor::Editor;
 use crate::judge::{Judge, MANIPULATION_QUESTION, SUSPICIOUS};
 use crate::logs;
@@ -48,7 +48,7 @@ impl Server {
     fn start_with_patience(settings: &McpServer, patience: Duration) -> Result<Server> {
         let mut child = Command::new(&settings.command)
             .args(&settings.args)
-            .envs(&settings.env)
+            .envs(config::environment(&settings.env))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

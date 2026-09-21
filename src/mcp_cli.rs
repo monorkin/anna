@@ -5,12 +5,23 @@ use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 
 use crate::config::{Config, McpServer};
+use crate::control;
 use crate::mcp::{self, Server};
 
 pub fn add(name: &str, command: &[String]) -> Result<()> {
     register(name, command, BTreeMap::new())?;
     println!("Added {name}.");
-    list_one(name, &Config::load()?.mcp_servers[name])
+    list_one(name, &Config::load()?.mcp_servers[name])?;
+    say_if_she_has_to_restart();
+    Ok(())
+}
+
+/// She reads her config when she starts. Saying "removed" while the running
+/// Anna goes on offering the server would be a lie about what is protected.
+fn say_if_she_has_to_restart() {
+    if control::is_running() {
+        println!("Anna is running with the config she started with. `anna stop` and `anna start` for this to take effect.");
+    }
 }
 
 /// Adding without a word, for setup, which has its own way of saying things.
@@ -54,6 +65,7 @@ pub fn remove(name: &str) -> Result<()> {
     }
     config.save()?;
     println!("Removed {name}.");
+    say_if_she_has_to_restart();
     Ok(())
 }
 
@@ -70,6 +82,7 @@ pub fn mark_prose(name: &str, tool: &str, argument: &str) -> Result<()> {
     }
     config.save()?;
     println!("{tool}'s {argument} now goes through the editor, and hands can't be granted {tool}.");
+    say_if_she_has_to_restart();
     Ok(())
 }
 

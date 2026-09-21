@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use crate::claude;
 use crate::clock;
-use crate::config::{Source, Trigger};
+use crate::config::{self, Source, Trigger};
 use crate::control::{self, Controls};
 use crate::conversation::{self, Conversation, Origin, Standing, Terminal};
 use crate::judge::Screening;
@@ -245,7 +245,7 @@ fn poke_for_every_line(trigger: &Trigger, poke: &Sender<()>) -> Result<()> {
     let mut command = Command::new(&trigger.command);
     command
         .args(&trigger.args)
-        .envs(&trigger.env)
+        .envs(config::environment(&trigger.env))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());

@@ -449,7 +449,7 @@ fn basecamp_source(profile: &str, watches: bool, anyone: bool) -> Source {
 /// The environment a tool runs in when the agent has a profile of its own
 /// there: its config lives in the agent's folder, not the person's.
 fn own_tool_config() -> BTreeMap<String, String> {
-    BTreeMap::from([("XDG_CONFIG_HOME".to_string(), paths::tools_config_home().to_string_lossy().into_owned())])
+    BTreeMap::from([("XDG_CONFIG_HOME".to_string(), config::HER_TOOLS.to_string())])
 }
 
 /// A name to suggest for an address: marta.k@example.com is probably Marta.
@@ -563,7 +563,7 @@ impl Doing for Machine {
         std::fs::create_dir_all(paths::tools_config_home())?;
         let status = Command::new(tool)
             .args(["auth", "agent", "connect", "--profile", profile, "--software-name", agent])
-            .envs(own_tool_config())
+            .envs(config::environment(&own_tool_config()))
             .status()
             .with_context(|| format!("could not run {tool}"))?;
 
@@ -809,8 +809,9 @@ mod tests {
         assert_eq!(doing.connected, ["basecamp botten Botten"], "the profile is named after the agent");
         assert!(!asking.asked.iter().any(|it| it.contains("secret")), "connecting is the command line's, and setup never asks for a secret");
         assert_eq!(doing.servers[0], ("basecamp".to_string(), words(&["basecamp", "--profile", "botten", "mcp"])));
-        assert!(doing.server_env[0]["XDG_CONFIG_HOME"].ends_with("/anna/tools"), "her Basecamp profile lives in her own folder");
-        assert!(source_env(&doing).ends_with("/anna/tools"));
+        assert_eq!(doing.server_env[0]["XDG_CONFIG_HOME"], "{tools}", "her Basecamp profile lives in her own folder, wherever that is");
+        assert_eq!(source_env(&doing), "{tools}");
+        assert!(config::environment(&doing.server_env[0])["XDG_CONFIG_HOME"].ends_with("/anna/tools"));
         assert!(doing.server_env[1].is_empty(), "a tool used as you runs with your own config");
         let (name, source) = &doing.sources[0];
         assert_eq!(name, "basecamp");
