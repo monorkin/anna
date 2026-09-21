@@ -56,10 +56,10 @@ source:
   — `people` in the config — can change how the agent behaves and have it do
   things on the machine it runs on. **Everyone else**, on a source with
   `anyone`, can hand it work and nothing more. The difference isn't only what
-  the thread is told: a turn on an untrusted word runs with `--tools
-  Read,Grep,Glob`, so it has no shell and can't write on the host — a reboot
-  or an edit to its own config isn't refused, it isn't there — while the
-  broker's tools stay, so the work still gets done by hands in their
+  the thread is told: a turn on an untrusted word runs with none of Claude
+  Code's own tools, so it has no shell and can't read or write on the host —
+  a reboot or an edit to its own config isn't refused, it isn't there —
+  while the broker's tools stay, so the work still gets done by hands in their
   sandboxes. A schedule keeps the standing of the turn that made it, so
   nobody schedules their way up. What one thread tells another always arrives
   untrusted. `anna chat` is trusted: whoever is at the terminal can already do
@@ -212,6 +212,59 @@ Not built, or not working yet:
   answer: registries as something the proxy can be told to allow per hand.
 - The classifier-driven dispatcher (routing, model choice), and transcripts
   of hands being kept for memory.
+
+### After codex's review (2026-09-21)
+
+The whole review is in `reviews/2026-09-21-codex.md`: thirty findings, the
+worst of them ways around the trust tiers. What changed because of it:
+
+- **Trust.** A hand is refused any folder that touches Anna's own state, the
+  home folder or a dot-folder in it — before, someone who could only hand out
+  work could point a hand at her database and write a trusted schedule. Turns
+  on an untrusted word lost `Read,Grep,Glob` too. Board lines are one short
+  line and screened; MCP errors are screened like results. A hand is only
+  granted tools their server declares read-only (`readOnlyHint`), so a server
+  added today can't post through a hand before anything is marked as prose.
+- **Sandbox.** Nothing of Anna's environment goes in. A hand can't start a
+  repository or repoint a worktree's `.git` file. Sessions run in a systemd
+  scope with a ceiling on memory and processes, when the user's systemd gives
+  one. A test runs the real sandbox with a shell where Claude would be.
+- **Staying up.** SIGPIPE is ignored where she talks to servers, so a dead
+  one is an error and not her end. A server gets two minutes to answer, is
+  stopped when it doesn't, and is started again on the next call if its tools
+  still match. Haiku, the keyring and mise have deadlines. A turn that is
+  over stops its hands and reviewers and closes its endpoint. Turns in a
+  conversation run in the order they came, from a bounded queue. One Anna at
+  a time and one turn per conversation at a time, held by kernel locks.
+- **Not losing things.** A message that couldn't be checked is tried again
+  instead of consumed. Seen ids and every private file are written whole and
+  moved into place. Migrations take the write lock before reading the
+  version, and a database from a newer Anna is refused.
+- **Privacy.** What Claude is told goes in on stdin, not in arguments any
+  user can read. Her folders are closed at the top on every start; the log
+  and staging files are private; the log keeps sizes instead of what she
+  wrote. `--without-secrets` leaves her tools' logins out as well.
+- **Backup and restore.** A file that can't be read fails the backup. Links
+  are left out of backups and refused on restore. Restore checks every entry
+  before writing any, `--force` clears what it replaces — an old write-ahead
+  log included — and her tools' folder is written as `{tools}` so it follows
+  her to another home.
+
+Still open from the review:
+
+- **Standing doesn't survive history or memory.** Trusted and untrusted turns
+  share one session, and katami's reviewer takes any "user" turn as evidence.
+  Needs katami's `origin` and speaker (already on the list below).
+- katami named its hook socket and overlay after the process alone, so two
+  conversations at once took each other's. Fixed in katami's checkout
+  (`paths::name_for_one_session`); it reaches Anna when katami is pushed and
+  her lockfile bumped.
+- The editor only sees arguments marked as prose; an unmarked posting tool
+  still posts unedited from a thread.
+- Mail is marked delivered when it is queued, not when its turn ran. Seen ids
+  and delivered mail are never pruned. A server that fails at startup is left
+  out until she is restarted. The proxy and broker take any number of
+  connections.
 
 ## Decided
 
