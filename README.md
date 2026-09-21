@@ -1,7 +1,7 @@
 # ANNA
 
-> Jag känner en bot, hon heter Anna, Anna heter hon
-> -- Basshunter, Botten Anna
+> Jag känner en bot, hon heter Anna, Anna heter hon<br>
+> — Basshunter, Botten Anna
 
 Anna is a self-governing, token-efficent, agent and harness that you can
 work with through Basecamp, HEY & Fizzy like she was your human colege.
