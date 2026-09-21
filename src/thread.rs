@@ -33,9 +33,12 @@ use crate::thread_tools::{Dismiss, Hands, Reply, SendBack, StartHand, Workshop};
 
 const TOOL_TIMEOUT_MILLISECONDS: &str = "7200000";
 
-const ROLE: &str = "You are Anna, working as a colleague rather than a tool. \
-Someone is talking to you in a conversation; the reply tool is the only way they hear from you, so use it for every answer, question, and update. \
-You plan and check; hands do the work inside projects. Give a hand one project folder and a brief that carries everything it needs, because it knows nothing you know. \
+const WHO: &str = "You are Anna, working as a colleague rather than a tool. Someone is talking to you in a conversation.";
+
+const SPEAKING_WITH_THE_REPLY_TOOL: &str =
+    "The reply tool is the only way they hear from you, so use it for every answer, question, and update.";
+
+const WORKING: &str = "You plan and check; hands do the work inside projects. Give a hand one project folder and a brief that carries everything it needs, because it knows nothing you know. \
 A reviewer checks every hand's work against your brief and tells you what was actually done; send the hand back with the reviewer's notes when the work isn't right, and dismiss it when you're done with it. \
 You are not sandboxed and hands are, so never run code, scripts, tests or build tools from a folder a hand has worked in — have a hand do it. Reading files there is fine. \
 When something can't be done, say what you tried and what you can do instead.";
@@ -53,19 +56,26 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, message: &st
     });
     let spoke = Arc::new(AtomicBool::new(false));
 
+    let answered_otherwise = conversation.answered_otherwise();
     let mut tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(Reply { conversation: conversation.clone(), editor: runtime.editor.clone(), spoke: spoke.clone() }),
         Box::new(StartHand { workshop: workshop.clone(), catalog: runtime.catalog.clone() }),
         Box::new(SendBack { workshop }),
         Box::new(Dismiss { hands: hands.clone() }),
     ];
+    if answered_otherwise.is_none() {
+        tools.push(Box::new(Reply {
+            conversation: conversation.clone(),
+            editor: runtime.editor.clone(),
+            spoke: spoke.clone(),
+        }));
+    }
     tools.extend(runtime.catalog.all());
     let endpoint = Endpoint::open(&paths::socket(&format!("thread-{key}")), tools)?;
 
     logs::event("thread.woken", json!({ "conversation": key }));
     let session = Session::of(&directory)?;
     let memory = Supervision::begin(&directory, &key)?;
-    let mut command = turn(&directory, &endpoint, &session, &role(runtime), message)?;
+    let mut command = turn(&directory, &endpoint, &session, &role(runtime, answered_otherwise.as_deref()), message)?;
     memory.cover(&mut command);
 
     let outcome = claude::reply_of(&mut command, runtime.outside.time_limit);
@@ -75,7 +85,7 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, message: &st
     match outcome {
         Ok(reply) => {
             session.keep()?;
-            if !spoke.load(Ordering::Relaxed) {
+            if answered_otherwise.is_none() && !spoke.load(Ordering::Relaxed) {
                 conversation.say(&runtime.editor.polish(&reply.result)?)?;
             }
             logs::event("thread.slept", json!({ "conversation": key, "session": reply.session_id }));
@@ -153,11 +163,14 @@ fn turn(directory: &Path, endpoint: &Endpoint, session: &Session, role: &str, me
     Ok(command)
 }
 
-fn role(runtime: &Runtime) -> String {
-    match &runtime.personality {
-        Some(personality) => format!("{ROLE}\n\n{personality}"),
-        None => ROLE.to_string(),
+fn role(runtime: &Runtime, answered_otherwise: Option<&str>) -> String {
+    let speaking = answered_otherwise.unwrap_or(SPEAKING_WITH_THE_REPLY_TOOL);
+    let mut role = format!("{WHO} {speaking} {WORKING}");
+    if let Some(personality) = &runtime.personality {
+        role.push_str("\n\n");
+        role.push_str(personality);
     }
+    role
 }
 
 #[cfg(test)]

@@ -62,6 +62,20 @@ source:
   the one this was made for. Every line is a poke; she restarts the command
   when it exits, reaps it, and takes it down with her. In the config:
   `"trigger": { "command": "hey", "args": ["watch", "--events", "new"] }`.
+- Basecamp as a source, checked against the real thing. `basecamp watch` (on
+  the CLI's `tui` branch) is a trigger as it is. Reading after the poke is
+  `basecamp_account` / `get_my_notifications`, and that took three changes: a
+  source's `id` can be several pointers, because Basecamp bumps the same
+  notification for every new comment (`["/id", "/unread_at"]`); `text` can be
+  several too, because the body is only an excerpt (`/title`,
+  `/content_excerpt`, `/app_url` — the thread reads the rest with its tools);
+  and `reply` is optional, because the recording id has to be parsed out of a
+  URL and how you answer depends on what you're answering — the thread then
+  gets no reply tool and is told to answer with Basecamp's own. Long
+  conversation ids (sgids) are hashed so they fit a socket path.
+- `anna source check <name>` reads a source once and shows what Anna would
+  make of it, without remembering or waking anything. Run read-only against
+  the real server: 23 of 23 notifications parsed.
 - One binary. katami and ax are library crates with a thin binary each
   (`cli.rs` holds their command line), and Anna depends on both by path.
   `anna memory …` and `anna claude account …` are their own subcommands

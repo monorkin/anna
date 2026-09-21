@@ -22,6 +22,7 @@ mod secrets;
 mod service;
 mod setup;
 mod source;
+mod source_cli;
 mod thread;
 mod thread_tools;
 mod toolchains;
@@ -73,6 +74,11 @@ enum Command {
         #[usage(subcommand)]
         command: McpCommand,
     },
+    /// Look at the places Anna listens
+    Source {
+        #[usage(subcommand)]
+        command: SourceCommand,
+    },
     /// Inspect and manage what Anna remembers
     Memory {
         #[usage(subcommand)]
@@ -83,6 +89,12 @@ enum Command {
         #[usage(subcommand)]
         command: ClaudeCommand,
     },
+}
+
+#[derive(Subcommands)]
+enum SourceCommand {
+    /// Read a source once and show what Anna would make of it, without acting on anything
+    Check { name: String },
 }
 
 #[derive(Subcommands)]
@@ -153,6 +165,9 @@ fn run(cli: Cli) -> Result<()> {
             McpCommand::List => mcp_cli::list(),
             McpCommand::Remove { name } => mcp_cli::remove(&name),
             McpCommand::Prose { name, tool, argument } => mcp_cli::mark_prose(&name, &tool, &argument),
+        },
+        Command::Source { command } => match command {
+            SourceCommand::Check { name } => source_cli::check(&name),
         },
         Command::Memory { command } => katami::cli::run(katami::cli::Cli {
             command: katami::cli::Command::Memory { command },

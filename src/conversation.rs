@@ -7,6 +7,12 @@ use anyhow::Result;
 pub trait Conversation: Send + Sync {
     fn key(&self) -> &str;
     fn say(&self, text: &str) -> Result<()>;
+
+    /// Set when there is no one way to say something here, and the thread
+    /// has to answer with other tools: what it is told to do instead.
+    fn answered_otherwise(&self) -> Option<String> {
+        None
+    }
 }
 
 pub struct Terminal {

@@ -2,17 +2,19 @@
 //! messages, remembering which ones were already seen, and answering back
 //! into the conversation a message came from.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::config::{Call, Source};
+use crate::config::{Call, Pointers, Source};
 use crate::conversation::Conversation;
 use crate::mcp::Catalog;
 use crate::paths;
+
+const LONGEST_KEY_PART: usize = 32;
 
 #[derive(Debug, PartialEq)]
 pub struct Message {
@@ -33,13 +35,24 @@ pub fn messages_in(source: &Source, answer: &str) -> Result<Vec<Message>> {
         .iter()
         .filter_map(|item| {
             Some(Message {
-                id: text_at(item, &source.id)?,
+                id: all_at(item, &source.id, ":")?,
                 conversation: text_at(item, &source.conversation)?,
                 sender: text_at(item, &source.sender)?,
-                text: text_at(item, &source.text)?,
+                text: all_at(item, &source.text, "\n\n")?,
             })
         })
         .collect())
+}
+
+/// The values at every pointer, joined. A pointer that finds nothing is
+/// skipped, as long as one of them finds something.
+fn all_at(item: &Value, pointers: &Pointers, separator: &str) -> Option<String> {
+    let found: Vec<String> = pointers.each().into_iter().filter_map(|it| text_at(item, it)).collect();
+    if found.is_empty() {
+        None
+    } else {
+        Some(found.join(separator))
+    }
 }
 
 fn text_at(item: &Value, pointer: &str) -> Option<String> {
@@ -88,24 +101,21 @@ impl Seen {
 }
 
 /// A conversation on a source. Saying something is the source's reply call
-/// with the conversation and the text filled in.
+/// with the conversation and the text filled in — when the source has one.
+/// Where answering isn't a single call, there is nothing generic to say it
+/// with, and the thread is told to use the server's own tools.
 pub struct Sourced {
     key: String,
     conversation: String,
     server: String,
-    reply: Call,
+    reply: Option<Call>,
     catalog: Arc<Catalog>,
 }
 
 impl Sourced {
     pub fn new(source_name: &str, source: &Source, conversation: &str, catalog: Arc<Catalog>) -> Sourced {
-        let safe: String = conversation
-            .chars()
-            .map(|it| if it.is_ascii_alphanumeric() { it } else { '-' })
-            .collect();
-
         Sourced {
-            key: format!("{source_name}-{safe}"),
+            key: format!("{source_name}-{}", key_part(conversation)),
             conversation: conversation.to_string(),
             server: source.server.clone(),
             reply: source.reply.clone(),
@@ -120,9 +130,46 @@ impl Conversation for Sourced {
     }
 
     fn say(&self, text: &str) -> Result<()> {
-        let arguments = filled(&self.reply.arguments, &self.conversation, text);
-        self.catalog.call(&self.server, &self.reply.tool, &arguments)?;
-        Ok(())
+        match &self.reply {
+            Some(reply) => {
+                let arguments = filled(&reply.arguments, &self.conversation, text);
+                self.catalog.call(&self.server, &reply.tool, &arguments)?;
+                Ok(())
+            }
+            None => bail!("there is no single way to reply on {}", self.server),
+        }
+    }
+
+    fn answered_otherwise(&self) -> Option<String> {
+        match self.reply {
+            Some(_) => None,
+            None => Some(format!(
+                "There is no reply tool in this conversation. Answer where the message came from, using the {} tools and the link in the message. Anything you write to a person there is held to the same style as a reply.",
+                self.server
+            )),
+        }
+    }
+}
+
+/// The conversation's id, made safe for a folder name and short enough for a
+/// socket path, which is capped at 108 bytes. A long id — Basecamp's signed
+/// ids run to hundreds of characters — keeps its start and gets a hash of the
+/// whole, so the same conversation always lands on the same thread.
+fn key_part(conversation: &str) -> String {
+    let safe: String = conversation
+        .chars()
+        .map(|it| if it.is_ascii_alphanumeric() { it } else { '-' })
+        .collect();
+
+    if safe.len() <= LONGEST_KEY_PART {
+        safe
+    } else {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in conversation.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{}-{hash:016x}", &safe[..12])
     }
 }
 
@@ -190,6 +237,56 @@ mod tests {
     }
 
     #[test]
+    fn a_basecamp_notification_is_new_again_when_its_thread_gets_another_comment() {
+        let basecamp: Source = serde_json::from_value(json!({
+            "server": "basecamp",
+            "watch": { "tool": "basecamp_account", "arguments": { "action": "get_my_notifications" } },
+            "trigger": { "command": "basecamp", "args": ["watch", "--json"] },
+            "items": "/unreads",
+            "id": ["/id", "/unread_at"],
+            "conversation": "/readable_sgid",
+            "sender": "/creator/email_address",
+            "text": ["/title", "/content_excerpt", "/app_url"],
+        }))
+        .unwrap();
+        assert_eq!(basecamp.reply, None);
+
+        let reading = |unread_at: &str| {
+            json!({ "unreads": [{
+                "id": 501,
+                "unread_at": unread_at,
+                "readable_sgid": "BAh7CEkiCG".repeat(20),
+                "creator": { "email_address": "marta@example.com" },
+                "title": "Re: Deploy checklist",
+                "content_excerpt": "Can you take the staging part?",
+                "app_url": "https://3.basecamp.com/1/buckets/2/messages/3",
+            }]})
+            .to_string()
+        };
+
+        let first = messages_in(&basecamp, &reading("2026-09-21T08:00:00Z")).unwrap().remove(0);
+        let second = messages_in(&basecamp, &reading("2026-09-21T09:30:00Z")).unwrap().remove(0);
+        assert_eq!(first.id, "501:2026-09-21T08:00:00Z");
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.conversation, second.conversation);
+        assert_eq!(
+            first.text,
+            "Re: Deploy checklist\n\nCan you take the staging part?\n\nhttps://3.basecamp.com/1/buckets/2/messages/3"
+        );
+    }
+
+    #[test]
+    fn long_conversation_ids_are_shortened_the_same_way_every_time() {
+        let sgid = "BAh7CEkiCG--".repeat(30);
+
+        assert_eq!(key_part("900"), "900");
+        assert_eq!(key_part("thread/7"), "thread-7");
+        assert_eq!(key_part(&sgid), key_part(&sgid));
+        assert_eq!(key_part(&sgid).len(), 12 + 1 + 16);
+        assert_ne!(key_part(&sgid), key_part(&format!("{sgid}x")));
+    }
+
+    #[test]
     fn the_backlog_is_remembered_but_only_later_messages_are_new() {
         let path = std::env::temp_dir().join(format!("anna-seen-{}/seen.json", std::process::id()));
         let mut seen = Seen::load_from(path.clone());
@@ -209,7 +306,7 @@ mod tests {
 
     #[test]
     fn replies_fill_in_the_conversation_and_the_text() {
-        let arguments = filled(&source().reply.arguments, "900", "On it.");
+        let arguments = filled(&source().reply.unwrap().arguments, "900", "On it.");
         assert_eq!(arguments, json!({ "recording_id": 900, "content": "On it." }));
 
         let nested = filled(&json!({ "to": ["thread/{conversation}"], "draft": false }), "abc", "hi");

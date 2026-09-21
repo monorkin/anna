@@ -50,6 +50,7 @@ anna mcp add basecamp -- basecamp mcp     # also accepts a server's changed tool
 anna mcp list
 anna mcp prose basecamp create_comment content   # this argument is prose for people: restyle it
 anna mcp remove basecamp
+anna source check basecamp                # read a source once and show what she'd make of it, without acting
 
 # Subscription management
 anna claude account add # add the current Claude Code account to the rotation

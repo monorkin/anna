@@ -75,19 +75,44 @@ pub struct Source {
     pub every_seconds: u64,
     /// JSON pointer to the array of messages in the watch tool's answer.
     pub items: String,
-    pub id: String,
+    /// What makes a message a new one. Several pointers when the id alone
+    /// isn't enough: Basecamp bumps the same notification for every new
+    /// comment on a thread, so there it is the id and when it went unread.
+    pub id: Pointers,
     pub conversation: String,
     pub sender: String,
-    pub text: String,
+    /// What the thread is told. Several pointers when a source splits it up —
+    /// a title, an excerpt, and a link to read the rest.
+    pub text: Pointers,
     /// The call that answers in a conversation. `{conversation}` and
-    /// `{text}` in its arguments are filled in.
-    pub reply: Call,
+    /// `{text}` in its arguments are filled in. Left out when answering isn't
+    /// one call — on Basecamp it depends on what is being answered — and the
+    /// thread then answers with the server's own tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<Call>,
     /// A command that runs for as long as Anna does and prints a line
     /// whenever something happens on this source — `hey watch --events new`,
     /// say. Every line is a poke. With one of these the timer only has to
     /// catch what the trigger missed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<Trigger>,
+}
+
+/// One JSON pointer, or several whose values belong together.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum Pointers {
+    One(String),
+    Several(Vec<String>),
+}
+
+impl Pointers {
+    pub fn each(&self) -> Vec<&str> {
+        match self {
+            Pointers::One(pointer) => vec![pointer],
+            Pointers::Several(pointers) => pointers.iter().map(String::as_str).collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
