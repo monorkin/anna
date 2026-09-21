@@ -172,7 +172,10 @@ fn key_part(conversation: &str) -> String {
         .map(|it| if it.is_ascii_alphanumeric() { it } else { '-' })
         .collect();
 
-    if safe.len() <= LONGEST_KEY_PART {
+    // Only an id that went through unchanged can stand for itself: `room/a`
+    // and `room-a` are different conversations that would otherwise share a
+    // thread, its history and its standing
+    if safe.len() <= LONGEST_KEY_PART && safe == conversation {
         safe
     } else {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -180,7 +183,7 @@ fn key_part(conversation: &str) -> String {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
-        format!("{}-{hash:016x}", &safe[..12])
+        format!("{}-{hash:016x}", &safe[..safe.len().min(12)])
     }
 }
 
@@ -292,8 +295,10 @@ mod tests {
         let sgid = "BAh7CEkiCG--".repeat(30);
 
         assert_eq!(key_part("900"), "900");
-        assert_eq!(key_part("thread/7"), "thread-7");
-        assert_eq!(key_part(&sgid), key_part(&sgid));
+        assert_eq!(key_part("thread-7"), "thread-7");
+        assert!(key_part("thread/7").starts_with("thread-7-"));
+        assert_ne!(key_part("thread/7"), key_part("thread-7"), "ids that only look alike once made safe are still two conversations");
+        assert_ne!(key_part("thread/7"), key_part("thread.7"));
         assert_eq!(key_part(&sgid).len(), 12 + 1 + 16);
         assert_ne!(key_part(&sgid), key_part(&format!("{sgid}x")));
     }

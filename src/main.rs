@@ -152,9 +152,14 @@ enum McpCommand {
 fn main() {
     paths::claim_own_state();
 
-    // Rust ignores SIGPIPE, which turns `anna log | head` into a panic
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    // Rust ignores SIGPIPE, which turns `anna log | head` into a panic. Only
+    // there: everywhere else a closed pipe has to come back as an error, or
+    // an MCP server that died takes the whole of Anna with it at the next
+    // write.
+    if std::env::args().nth(1).as_deref() == Some("log") {
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
     }
 
     let result = match std::env::args().nth(1).as_deref() {

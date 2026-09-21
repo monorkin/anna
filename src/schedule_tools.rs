@@ -26,6 +26,7 @@ use crate::logs;
 use crate::store::Store;
 
 const SHORTEST_GAP_SECONDS: i64 = 300;
+const DAYS_OF_RUNS_LOOKED_AT: i64 = 40;
 const MOST_PER_CONVERSATION: usize = 20;
 const ACCEPTED_DATES: [&str; 3] = ["%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"];
 
@@ -38,11 +39,23 @@ pub fn next_run(cron: &str, after: DateTime<Local>) -> Result<i64> {
     Ok(next.timestamp())
 }
 
+/// Every gap between runs over the coming weeks, not only the first: the
+/// minutes `0,5,6` are five apart and then one. Forty days takes in what a
+/// month's turn can bring, like the last minute of the 1st and the first of
+/// the 2nd.
 fn refuse_if_too_often(cron: &str, now: DateTime<Local>) -> Result<()> {
-    let first = next_run(cron, now)?;
-    let second = next_run(cron, Local.timestamp_opt(first, 0).single().context("that time does not exist")?)?;
-    if second - first < SHORTEST_GAP_SECONDS {
-        bail!("that would run every {} seconds; the most often anything may run is every five minutes", second - first);
+    let until = now.timestamp() + DAYS_OF_RUNS_LOOKED_AT * 24 * 3600;
+    let mut previous = next_run(cron, now)?;
+
+    while previous < until {
+        let at = Local.timestamp_opt(previous, 0).single().context("that time does not exist")?;
+        let Ok(next) = next_run(cron, at) else {
+            break;
+        };
+        if next - previous < SHORTEST_GAP_SECONDS {
+            bail!("that would run twice within {} seconds; the most often anything may run is every five minutes", next - previous);
+        }
+        previous = next;
     }
     Ok(())
 }
@@ -215,6 +228,9 @@ mod tests {
         assert!(refuse_if_too_often("*/2 * * * *", now).is_err());
         assert!(refuse_if_too_often("*/5 * * * *", now).is_ok());
         assert!(refuse_if_too_often("0 9 * * *", now).is_ok());
+
+        assert!(refuse_if_too_often("0,5,6 * * * *", at("2026-09-21 07:59")).is_err(), "the first gap is five minutes, the second is one");
+        assert!(refuse_if_too_often("0,59 0,23 1,2 * *", now).is_err(), "23:59 on the 1st and 00:00 on the 2nd");
     }
 
     #[test]

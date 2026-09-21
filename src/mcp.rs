@@ -16,7 +16,9 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::broker::Tool;
 use crate::config::{Config, McpServer};
@@ -24,15 +26,26 @@ use crate::editor::Editor;
 use crate::judge::{Judge, MANIPULATION_QUESTION, SUSPICIOUS};
 use crate::logs;
 
+/// How long a server gets to answer. Everyone who uses a server waits in
+/// line for it, so one that never answers would otherwise stop them all.
+const SECONDS_TO_ANSWER: u64 = 120;
+
 pub struct Server {
+    settings: McpServer,
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    lines: Receiver<String>,
     next_id: u64,
+    patience: Duration,
+    gone: bool,
 }
 
 impl Server {
     pub fn start(settings: &McpServer) -> Result<Server> {
+        Server::start_with_patience(settings, Duration::from_secs(SECONDS_TO_ANSWER))
+    }
+
+    fn start_with_patience(settings: &McpServer, patience: Duration) -> Result<Server> {
         let mut child = Command::new(&settings.command)
             .args(&settings.args)
             .envs(&settings.env)
@@ -43,10 +56,13 @@ impl Server {
             .with_context(|| format!("could not start {}", settings.command))?;
 
         let mut server = Server {
+            settings: settings.clone(),
             stdin: child.stdin.take().context("the server has no stdin")?,
-            stdout: BufReader::new(child.stdout.take().context("the server has no stdout")?),
+            lines: lines_of(child.stdout.take().context("the server has no stdout")?),
             child,
             next_id: 0,
+            patience,
+            gone: false,
         };
         server.request(
             "initialize",
@@ -66,6 +82,9 @@ impl Server {
     }
 
     pub fn call(&mut self, tool: &str, arguments: &Value) -> Result<String> {
+        if self.gone {
+            self.start_again()?;
+        }
         let result = self.request("tools/call", json!({ "name": tool, "arguments": arguments }))?;
         let text = result["content"]
             .as_array()
@@ -84,16 +103,39 @@ impl Server {
         Ok(text)
     }
 
+    /// A server that died or stopped answering is started again for the next
+    /// call, as long as it still offers what it offered when it was added.
+    fn start_again(&mut self) -> Result<()> {
+        let mut fresh = Server::start_with_patience(&self.settings, self.patience)
+            .with_context(|| format!("{} went away and did not start again", self.settings.command))?;
+        if let Some(expected) = &self.settings.fingerprint {
+            if fingerprint(&fresh.tools()?) != *expected {
+                bail!("{} went away, and came back with different tools; add it again to accept them", self.settings.command);
+            }
+        }
+        logs::event("mcp.started_again", json!({ "command": self.settings.command }));
+        *self = fresh;
+        Ok(())
+    }
+
     fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         self.next_id += 1;
         let id = self.next_id;
         self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
 
+        let deadline = Instant::now() + self.patience;
         loop {
-            let mut line = String::new();
-            if self.stdout.read_line(&mut line)? == 0 {
-                bail!("the server went away during {method}");
-            }
+            let line = match self.lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(line) => line,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.give_up();
+                    bail!("the server did not answer {method} within {} seconds", self.patience.as_secs());
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.give_up();
+                    bail!("the server went away during {method}");
+                }
+            };
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -107,10 +149,32 @@ impl Server {
     }
 
     fn send(&mut self, message: &Value) -> Result<()> {
-        writeln!(self.stdin, "{message}")?;
-        self.stdin.flush()?;
-        Ok(())
+        let sent = writeln!(self.stdin, "{message}").and_then(|_| self.stdin.flush());
+        if sent.is_err() {
+            self.give_up();
+        }
+        sent.context("the server is not listening any more")
     }
+
+    /// A server that missed its deadline is more likely stuck than slow, and
+    /// everyone is waiting in line behind it: it is stopped, and the next
+    /// call starts a new one.
+    fn give_up(&mut self) {
+        self.gone = true;
+        let _ = self.child.kill();
+    }
+}
+
+fn lines_of(output: ChildStdout) -> Receiver<String> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(output).lines().map_while(|line| line.ok()) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    receiver
 }
 
 impl Drop for Server {
@@ -299,6 +363,8 @@ while read -r line; do
     *'"tools/list"'*) echo "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/noise\"}"
                       echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"shout\",\"description\":\"Shouts\",\"inputSchema\":{\"type\":\"object\"}}]}}" ;;
     *'"shout"'*)      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"HELLO\"}],\"isError\":false}}" ;;
+    *'"stall"'*)      sleep 5 ;;
+    *'"die"'*)        exit 0 ;;
     *'"tools/call"'*) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"no such tool\"}],\"isError\":true}}" ;;
   esac
 done
@@ -337,6 +403,27 @@ done
 
         settings.fingerprint = Some("0000000000000000".to_string());
         assert!(listed(&settings).is_err());
+    }
+
+    #[test]
+    fn a_server_that_hangs_or_dies_is_given_up_on_and_started_again() {
+        let mut settings = fake_server();
+        settings.fingerprint = Some(fingerprint_of(&settings).unwrap());
+        let mut server = Server::start_with_patience(&settings, Duration::from_secs(1)).unwrap();
+
+        let began = Instant::now();
+        let stalled = server.call("stall", &json!({})).unwrap_err().to_string();
+        assert_eq!(stalled, "the server did not answer tools/call within 1 seconds");
+        assert!(began.elapsed() < Duration::from_secs(3));
+        assert_eq!(server.call("shout", &json!({})).unwrap(), "HELLO", "the next call gets a new server");
+
+        assert!(server.call("die", &json!({})).unwrap_err().to_string().contains("went away"));
+        assert_eq!(server.call("shout", &json!({})).unwrap(), "HELLO");
+
+        server.settings.fingerprint = Some("0000000000000000".to_string());
+        server.call("die", &json!({})).unwrap_err();
+        let changed = server.call("shout", &json!({})).unwrap_err().to_string();
+        assert!(changed.contains("came back with different tools"), "{changed}");
     }
 
     #[test]
