@@ -283,6 +283,17 @@ pub fn ask_haiku(prompt: &str, text: &str) -> Result<String> {
     Ok(reply.result)
 }
 
+/// Who she is to Claude right now, for `anna status`: the login in the
+/// config folder she works from, which is the allowance she is spending.
+pub fn login() -> String {
+    let home = paths::claude_config_home();
+    let account = read_json(&home.join(".claude.json")).ok().map(|it| it["oauthAccount"].clone()).unwrap_or_default();
+    match account["emailAddress"].as_str() {
+        Some(address) => format!("{address} ({})", home.display()),
+        None => format!("nobody is logged in under {}", home.display()),
+    }
+}
+
 pub fn write_hand_profile(profile: &Path) -> Result<()> {
     let home = paths::claude_config_home();
     let credentials: Value = read_json(&home.join(".credentials.json"))?;

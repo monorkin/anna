@@ -65,8 +65,9 @@ pub fn status() -> Result<()> {
         Ok(answer) => {
             let status = &answer["status"];
             println!("Anna has been running since {}, as process {}.", text(&status["since"]), status["process"]);
+            println!("Working as: {}", text(&status["claude_login"]));
             println!("Listening on: {}", names(&status["sources"]));
-            println!("Conversations so far: {}", status["conversations"]);
+            println!("Conversations going on: {}", status["conversations"]);
         }
         Err(_) => println!("Anna isn't running."),
     }

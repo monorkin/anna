@@ -141,6 +141,7 @@ impl Controls for Running {
         json!({
             "since": self.since,
             "process": std::process::id(),
+            "claude_login": claude::login(),
             "sources": self.pokes.lock().unwrap().keys().collect::<Vec<_>>(),
             "conversations": self.turns.busy_conversations(),
         })

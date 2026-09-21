@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::fsutil;
 use crate::paths;
@@ -37,6 +37,14 @@ pub struct Config {
     /// front of it, or a stand-in for runs that must not touch the real one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jev_url: Option<String>,
+    /// The Claude Code config folder she works from, which is which Claude
+    /// login she works as. Left out, it is whatever the shell that started
+    /// her had — so started from another terminal she would be someone else,
+    /// and she would share a login, and its allowance, with whoever works
+    /// there. Pointing her at a folder that is already logged in needs no
+    /// login of her own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_config_dir: Option<PathBuf>,
     /// Set to false when something else already runs `ax auto-switch`.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub rotate_accounts: bool,
@@ -70,6 +78,7 @@ impl Default for Config {
             sources: BTreeMap::new(),
             people: BTreeMap::new(),
             jev_url: None,
+            claude_config_dir: None,
             rotate_accounts: true,
             minutes_per_run: an_hour(),
         }

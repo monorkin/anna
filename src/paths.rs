@@ -50,9 +50,21 @@ pub fn claim_own_state() {
     unsafe {
         env::set_var("KATAMI_DATA_DIR", memory_dir());
         env::set_var("AX_DATA_DIR", accounts_dir());
+        // So what ax tells someone to run next is a command that exists here
+        env::set_var("AX_INVOKED_AS", "anna claude");
     }
     keep_to_herself(&config_dir());
     keep_to_herself(&data_dir());
+}
+
+/// Which Claude login she works as, when her config names one. Set in the
+/// environment like the rest, so claude, katami and ax — and everything
+/// they start in turn — all find the same one.
+pub fn work_as(claude_config_dir: &std::path::Path) {
+    // Before any thread exists: main calls this right after claim_own_state
+    unsafe {
+        env::set_var("CLAUDE_CONFIG_DIR", claude_config_dir);
+    }
 }
 
 /// Her folders are closed to everyone else at the top, every time she
