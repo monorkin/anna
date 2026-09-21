@@ -4,8 +4,19 @@
 
 use anyhow::Result;
 
+pub const TERMINAL: &str = "terminal";
+
+/// Where a conversation lives: enough to find it again later, when a
+/// schedule comes due or another thread has something to tell it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Origin {
+    pub source: String,
+    pub conversation: String,
+}
+
 pub trait Conversation: Send + Sync {
     fn key(&self) -> &str;
+    fn origin(&self) -> Origin;
     fn say(&self, text: &str) -> Result<()>;
 
     /// Set when there is no one way to say something here, and the thread
@@ -17,6 +28,7 @@ pub trait Conversation: Send + Sync {
 
 pub struct Terminal {
     key: String,
+    name: String,
 }
 
 impl Terminal {
@@ -26,7 +38,8 @@ impl Terminal {
             .map(|it| if it.is_ascii_alphanumeric() { it.to_ascii_lowercase() } else { '-' })
             .collect();
         Terminal {
-            key: format!("terminal-{name}"),
+            key: format!("{TERMINAL}-{name}"),
+            name,
         }
     }
 }
@@ -34,6 +47,13 @@ impl Terminal {
 impl Conversation for Terminal {
     fn key(&self) -> &str {
         &self.key
+    }
+
+    fn origin(&self) -> Origin {
+        Origin {
+            source: TERMINAL.to_string(),
+            conversation: self.name.clone(),
+        }
     }
 
     fn say(&self, text: &str) -> Result<()> {

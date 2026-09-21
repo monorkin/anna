@@ -29,6 +29,8 @@ use crate::conversation::Conversation;
 use crate::logs;
 use crate::paths;
 use crate::runtime::Runtime;
+use crate::schedule_tools::{CancelSchedule, ListSchedules, Schedule};
+use crate::work_tools::{self, ClaimWork, FinishWork, ListWork, TellThread};
 use crate::thread_tools::{Dismiss, Hands, Reply, SendBack, StartHand, Workshop};
 
 const TOOL_TIMEOUT_MILLISECONDS: &str = "7200000";
@@ -41,6 +43,7 @@ const SPEAKING_WITH_THE_REPLY_TOOL: &str =
 const WORKING: &str = "You plan and check; hands do the work inside projects. Give a hand one project folder and a brief that carries everything it needs, because it knows nothing you know. \
 A reviewer checks every hand's work against your brief and tells you what was actually done; send the hand back with the reviewer's notes when the work isn't right, and dismiss it when you're done with it. \
 You are not sandboxed and hands are, so never run code, scripts, tests or build tools from a folder a hand has worked in — have a hand do it. Reading files there is fine. \
+You run several conversations at once as separate threads that don't share what they know, so put real work on the board with claim_work as soon as you know what it is, and take it off with finish_work; when another thread's work overlaps with yours, settle who does it with tell_thread rather than solving it twice. \
 When something can't be done, say what you tried and what you can do instead.";
 
 pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, message: &str) -> Result<()> {
@@ -69,13 +72,15 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, message: &st
             spoke: spoke.clone(),
         }));
     }
+    tools.extend(tools_for_later_and_for_others(runtime, conversation.as_ref()));
     tools.extend(runtime.catalog.all());
     let endpoint = Endpoint::open(&paths::socket(&format!("thread-{key}")), tools)?;
 
     logs::event("thread.woken", json!({ "conversation": key }));
     let session = Session::of(&directory)?;
     let memory = Supervision::begin(&directory, &key)?;
-    let mut command = turn(&directory, &endpoint, &session, &role(runtime, answered_otherwise.as_deref()), message)?;
+    let message = with_the_board(runtime, conversation.as_ref(), message);
+    let mut command = turn(&directory, &endpoint, &session, &role(runtime, answered_otherwise.as_deref()), &message)?;
     memory.cover(&mut command);
 
     let outcome = claude::reply_of(&mut command, runtime.outside.time_limit);
@@ -102,6 +107,34 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, message: &st
             }
             None => Err(error.context(format!("the thread for {key} could not finish its turn"))),
         },
+    }
+}
+
+/// Scheduling work for its future self, and the board it shares with the
+/// other threads.
+fn tools_for_later_and_for_others(runtime: &Runtime, conversation: &dyn Conversation) -> Vec<Box<dyn Tool>> {
+    let database = runtime.database.clone();
+    let origin = conversation.origin();
+    let thread = conversation.key().to_string();
+
+    vec![
+        Box::new(Schedule { database: database.clone(), origin: origin.clone() }),
+        Box::new(ListSchedules { database: database.clone(), origin: origin.clone() }),
+        Box::new(CancelSchedule { database: database.clone(), origin: origin.clone() }),
+        Box::new(ClaimWork { database: database.clone(), origin: origin.clone(), thread: thread.clone() }),
+        Box::new(FinishWork { database: database.clone(), origin: origin.clone(), thread: thread.clone() }),
+        Box::new(ListWork { database: database.clone(), origin }),
+        Box::new(TellThread { database, thread, judge: runtime.judge.clone() }),
+    ]
+}
+
+/// What the other threads have open goes in front of every message, so an
+/// overlap is noticed before the work starts rather than after. A board that
+/// can't be read is no reason not to answer.
+fn with_the_board(runtime: &Runtime, conversation: &dyn Conversation, message: &str) -> String {
+    match work_tools::others_are_working_on(&runtime.database, &conversation.origin()) {
+        Ok(Some(others)) => format!("{others}\n\n---\n\n{message}"),
+        _ => message.to_string(),
     }
 }
 

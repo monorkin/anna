@@ -1,0 +1,260 @@
+//! How threads keep out of each other's way.
+//!
+//! Two cards about one bug arrive as two conversations, so as two threads
+//! that know nothing of each other. The board is where they find out: a
+//! thread claims what it is working on, every thread is shown what the others
+//! have claimed when it wakes, and one that sees an overlap can tell the
+//! other thread directly. A message to another thread is delivered like any
+//! other message — it wakes that thread in its own conversation — so the
+//! person there sees what came of it.
+//!
+//! What one thread tells another started as text from outside, so it is
+//! screened like everything else untrusted. And threads can't talk each other
+//! into a loop: a thread may send so many messages an hour and no more.
+
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::broker::Tool;
+use crate::clock;
+use crate::conversation::Origin;
+use crate::judge::{Judge, MANIPULATION_QUESTION, SUSPICIOUS};
+use crate::logs;
+use crate::store::{Store, Work};
+
+const MOST_MESSAGES_AN_HOUR: i64 = 10;
+
+/// What a waking thread is told about the others, or nothing when the board
+/// is empty.
+pub fn others_are_working_on(database: &std::path::Path, origin: &Origin) -> Result<Option<String>> {
+    let work = Store::open_at(database)?.open_work_of_others(origin)?;
+    if work.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(format!(
+            "Your other threads are working on these right now. If what you are asked overlaps with one, don't solve it twice: tell that thread with tell_thread and say so here.\n{}",
+            listed(&work)
+        )))
+    }
+}
+
+fn listed(work: &[Work]) -> String {
+    work.iter()
+        .map(|it| match &it.project {
+            Some(project) => format!("- {} (thread {}, project {project})", it.title, it.thread),
+            None => format!("- {} (thread {})", it.title, it.thread),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|it| it.as_secs() as i64).unwrap_or(0)
+}
+
+pub struct ClaimWork {
+    pub database: PathBuf,
+    pub origin: Origin,
+    pub thread: String,
+}
+
+impl Tool for ClaimWork {
+    fn name(&self) -> &str {
+        "claim_work"
+    }
+
+    fn description(&self) -> &str {
+        "Put what you are working on in this conversation on the board your other threads see, so none of them solves it a second time. Claim as soon as you know what the work is, in a line someone else would recognize it by — the symptom and where, not the card number. Claiming again replaces your line."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string" },
+                "project": { "type": "string", "description": "The project or repository, when there is one" },
+            },
+            "required": ["title"],
+        })
+    }
+
+    fn call(&self, arguments: &Value) -> Result<String> {
+        let title = arguments["title"].as_str().filter(|it| !it.trim().is_empty()).context("title is required")?;
+        let store = Store::open_at(&self.database)?;
+        store.claim_work(&self.origin, &self.thread, title, arguments["project"].as_str(), &clock::timestamp())?;
+        logs::event("work.claimed", json!({ "thread": self.thread, "title": title }));
+
+        match others_are_working_on(&self.database, &self.origin)? {
+            Some(others) => Ok(format!("Claimed.\n\n{others}")),
+            None => Ok("Claimed. No other thread has anything open.".to_string()),
+        }
+    }
+}
+
+pub struct FinishWork {
+    pub database: PathBuf,
+    pub origin: Origin,
+    pub thread: String,
+}
+
+impl Tool for FinishWork {
+    fn name(&self) -> &str {
+        "finish_work"
+    }
+
+    fn description(&self) -> &str {
+        "Take your line off the board: the work in this conversation is done, handed to another thread, or given up on."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    fn call(&self, _arguments: &Value) -> Result<String> {
+        if Store::open_at(&self.database)?.finish_work(&self.origin, &clock::timestamp())? {
+            logs::event("work.finished", json!({ "thread": self.thread }));
+            Ok("Taken off the board.".to_string())
+        } else {
+            Ok("You had nothing on the board.".to_string())
+        }
+    }
+}
+
+pub struct ListWork {
+    pub database: PathBuf,
+    pub origin: Origin,
+}
+
+impl Tool for ListWork {
+    fn name(&self) -> &str {
+        "list_work"
+    }
+
+    fn description(&self) -> &str {
+        "See what your other threads have open right now, and the names to reach them by."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    fn call(&self, _arguments: &Value) -> Result<String> {
+        let work = Store::open_at(&self.database)?.open_work_of_others(&self.origin)?;
+        if work.is_empty() {
+            Ok("No other thread has anything open.".to_string())
+        } else {
+            Ok(listed(&work))
+        }
+    }
+}
+
+pub struct TellThread {
+    pub database: PathBuf,
+    pub thread: String,
+    pub judge: Arc<Judge>,
+}
+
+impl Tool for TellThread {
+    fn name(&self) -> &str {
+        "tell_thread"
+    }
+
+    fn description(&self) -> &str {
+        "Tell another of your threads something, by the thread name the board shows. It is woken in its own conversation with your message, so say what you know, what you are doing about it, and what you want from it — and remember the person in that conversation may see the result. Use it when work overlaps; it is not for chatting."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "thread": { "type": "string" }, "message": { "type": "string" } },
+            "required": ["thread", "message"],
+        })
+    }
+
+    fn call(&self, arguments: &Value) -> Result<String> {
+        let to_thread = arguments["thread"].as_str().context("thread is required")?;
+        let message = arguments["message"].as_str().filter(|it| !it.trim().is_empty()).context("message is required")?;
+        if to_thread == self.thread {
+            bail!("that is this thread");
+        }
+
+        let store = Store::open_at(&self.database)?;
+        let to = store
+            .origin_of_thread(to_thread)?
+            .with_context(|| format!("there is no thread called {to_thread} on the board; list_work shows the names"))?;
+
+        let now = unix_now();
+        if store.mail_sent_since(&self.thread, now - 3600)? >= MOST_MESSAGES_AN_HOUR {
+            bail!("this thread has sent {MOST_MESSAGES_AN_HOUR} messages in the last hour, which is the most it may; say what you need to in this conversation instead");
+        }
+        if self.judge.suspects(MANIPULATION_QUESTION, message, SUSPICIOUS) {
+            logs::event("mail.refused", json!({ "from": self.thread, "to": to_thread }));
+            bail!("that message read like an attempt to manipulate an agent and was not sent; say plainly what you found and what you want");
+        }
+
+        store.send_mail(&self.thread, &to, message, now)?;
+        logs::event("mail.sent", json!({ "from": self.thread, "to": to_thread }));
+        Ok(format!("Sent. {to_thread} will be woken with it."))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn origin(conversation: &str) -> Origin {
+        Origin { source: "basecamp".to_string(), conversation: conversation.to_string() }
+    }
+
+    #[test]
+    fn messages_only_go_to_other_threads_that_are_on_the_board() {
+        let directory = std::env::temp_dir().join(format!("anna-tell-thread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let database = directory.join("anna.db");
+        let tell = TellThread { database: database.clone(), thread: "basecamp-card-1".to_string(), judge: Arc::new(Judge::Haiku) };
+
+        let to_nobody = tell.call(&json!({ "thread": "basecamp-card-9", "message": "Same bug." })).unwrap_err();
+        assert!(to_nobody.to_string().contains("no thread called basecamp-card-9"));
+        let to_itself = tell.call(&json!({ "thread": "basecamp-card-1", "message": "Same bug." })).unwrap_err();
+        assert_eq!(to_itself.to_string(), "that is this thread");
+
+        let store = Store::open_at(&database).unwrap();
+        store.claim_work(&origin("card-2"), "basecamp-card-2", "Session cookie dropped", None, "t1").unwrap();
+        for _ in 0..MOST_MESSAGES_AN_HOUR {
+            store.send_mail("basecamp-card-1", &origin("card-2"), "again", unix_now()).unwrap();
+        }
+        let too_many = tell.call(&json!({ "thread": "basecamp-card-2", "message": "Same bug." })).unwrap_err();
+        assert!(too_many.to_string().contains("the most it may"));
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn two_threads_find_each_other_on_the_board() {
+        let directory = std::env::temp_dir().join(format!("anna-work-tools-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let database = directory.join("anna.db");
+
+        let first = ClaimWork { database: database.clone(), origin: origin("card-1"), thread: "basecamp-card-1".to_string() };
+        let claimed = first.call(&json!({ "title": "Login 500s on Safari", "project": "frontdesk" })).unwrap();
+        assert_eq!(claimed, "Claimed. No other thread has anything open.");
+        assert_eq!(others_are_working_on(&database, &origin("card-1")).unwrap(), None);
+
+        let second = ClaimWork { database: database.clone(), origin: origin("card-2"), thread: "basecamp-card-2".to_string() };
+        let claimed = second.call(&json!({ "title": "Session cookie dropped" })).unwrap();
+        assert!(claimed.contains("- Login 500s on Safari (thread basecamp-card-1, project frontdesk)"));
+
+        let seen = ListWork { database: database.clone(), origin: origin("card-1") }.call(&json!({})).unwrap();
+        assert_eq!(seen, "- Session cookie dropped (thread basecamp-card-2)");
+
+        let finish = FinishWork { database: database.clone(), origin: origin("card-2"), thread: "basecamp-card-2".to_string() };
+        assert_eq!(finish.call(&json!({})).unwrap(), "Taken off the board.");
+        assert_eq!(finish.call(&json!({})).unwrap(), "You had nothing on the board.");
+        assert_eq!(others_are_working_on(&database, &origin("card-1")).unwrap(), None);
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}

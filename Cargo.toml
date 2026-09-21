@@ -10,6 +10,10 @@ license = "MIT"
 katami = { path = "../katami" }
 ax = { path = "../ax" }
 anyhow = "1.0.104"
+chrono = "0.4.45"
+croner = "4.0.0"
+# The same version katami builds, so the binary carries one SQLite
+rusqlite = { version = "0.37", features = ["bundled"] }
 dirs = "6.0.0"
 libc = "0.2.189"
 serde = { version = "1.0.229", features = ["derive"] }

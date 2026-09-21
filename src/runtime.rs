@@ -8,7 +8,7 @@
 use anyhow::Result;
 use serde_json::json;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,10 +20,12 @@ use crate::mcp::Catalog;
 use crate::paths;
 use crate::proxy::{self, Proxy};
 use crate::sandbox::Outside;
+use crate::store::Store;
 use crate::toolchains::Toolchains;
 
 pub struct Runtime {
     pub config: Config,
+    pub database: PathBuf,
     pub personality: Option<String>,
     pub judge: Arc<Judge>,
     pub editor: Arc<Editor>,
@@ -49,8 +51,12 @@ impl Runtime {
             time_limit: Duration::from_secs(config.minutes_per_run * 60),
         });
 
+        let database = paths::database();
+        Store::open_at(&database)?;
+
         Ok(Runtime {
             config,
+            database,
             personality,
             judge,
             editor,

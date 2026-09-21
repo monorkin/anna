@@ -11,6 +11,7 @@
 //! different conversations run side by side.
 
 use anyhow::{Context, Result, bail};
+use chrono::Local;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -26,17 +27,20 @@ use crate::claude;
 use crate::clock;
 use crate::config::{Source, Trigger};
 use crate::control::{self, Controls};
-use crate::conversation::Conversation;
-use crate::judge::{MANIPULATION_QUESTION, SUSPICIOUS};
+use crate::conversation::{self, Conversation, Origin, Terminal};
+use crate::judge::Screening;
 use crate::logs;
 use crate::paths;
 use crate::runtime::Runtime;
+use crate::schedule_tools;
 use crate::source::{self, Message, Seen, Sourced};
+use crate::store::Store;
 use crate::thread;
 
 const SWITCH_AT_PERCENT: f64 = 90.0;
 const SECONDS_BETWEEN_ACCOUNT_CHECKS: u64 = 60;
 const SECONDS_BEFORE_RESTARTING_A_TRIGGER: u64 = 10;
+const SECONDS_BETWEEN_LOOKS_AT_THE_CLOCK: u64 = 30;
 
 #[derive(Default)]
 struct Turns {
@@ -56,13 +60,8 @@ impl Turns {
 
 pub fn run() -> Result<()> {
     let runtime = Arc::new(Runtime::start()?);
-    if runtime.config.sources.is_empty() {
-        bail!("there are no sources to listen on yet; `anna chat` works without them");
-    }
-
     let turns = Arc::new(Turns::default());
     let mut pokes = HashMap::new();
-    let mut listeners = Vec::new();
     for (name, source) in runtime.config.sources.clone() {
         let (poke, poked) = mpsc::channel();
         if let Some(trigger) = source.trigger.clone() {
@@ -72,7 +71,7 @@ pub fn run() -> Result<()> {
 
         let runtime = runtime.clone();
         let turns = turns.clone();
-        listeners.push(os_thread::spawn(move || listen(&runtime, &turns, &name, &source, &poked)));
+        os_thread::spawn(move || listen(&runtime, &turns, &name, &source, &poked));
     }
 
     control::serve(Arc::new(Running {
@@ -81,15 +80,15 @@ pub fn run() -> Result<()> {
         turns: turns.clone(),
     }))?;
     stop_on_signals();
+    keep_time(&runtime, &turns);
     if runtime.config.rotate_accounts {
         rotate_accounts();
     }
 
     logs::event("anna.listening", json!({ "sources": runtime.config.sources.keys().collect::<Vec<_>>() }));
-    for listener in listeners {
-        let _ = listener.join();
+    loop {
+        os_thread::park();
     }
-    Ok(())
 }
 
 /// What the control socket can ask of a running Anna.
@@ -263,16 +262,30 @@ fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Sou
         logs::event("message.ignored", json!({ "source": name, "sender": message.sender }));
         return;
     };
-    let conversation = Arc::new(Sourced::new(name, source, &message.conversation, runtime.catalog.clone()));
-    if runtime.judge.suspects(MANIPULATION_QUESTION, &message.text, SUSPICIOUS) {
-        logs::event("message.refused", json!({ "source": name, "sender": message.sender, "message": message.id }));
-        let _ = conversation.say("That read like instructions aimed at an AI rather than something from you, so I didn't act on it. If it was you, say it again in your own words.");
-        return;
+    let conversation: Arc<dyn Conversation> =
+        Arc::new(Sourced::new(name, source, &message.conversation, runtime.catalog.clone()));
+    match runtime.judge.screen(&message.text) {
+        Screening::Clear => {}
+        Screening::Suspicious => {
+            logs::event("message.refused", json!({ "source": name, "sender": message.sender, "message": message.id }));
+            let _ = conversation.say("That read like instructions aimed at an AI rather than something from you, so I didn't act on it. If it was you, say it again in your own words.");
+            return;
+        }
+        Screening::Unchecked => {
+            logs::event("message.unchecked", json!({ "source": name, "sender": message.sender, "message": message.id }));
+            let _ = conversation.say("I couldn't check that message before reading it — the checker isn't answering right now — so I haven't acted on it. Send it again in a bit.");
+            return;
+        }
     }
 
+    wake_in_turn(runtime, turns, conversation, format!("{person} says, on {name}:\n\n{}", message.text));
+}
+
+/// Wakes the conversation's thread on a thread of its own, after whatever
+/// turn that conversation already has running.
+fn wake_in_turn(runtime: &Arc<Runtime>, turns: &Arc<Turns>, conversation: Arc<dyn Conversation>, said: String) {
     let turn = turns.of(conversation.key());
     let runtime = runtime.clone();
-    let said = format!("{person} says, on {name}:\n\n{}", message.text);
 
     os_thread::spawn(move || {
         let _one_at_a_time = turn.lock().unwrap();
@@ -281,6 +294,82 @@ fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Sou
             let _ = conversation.say("Something broke on my side before I could finish this. I've logged it; ask me again and I'll pick it back up.");
         }
     });
+}
+
+/// The clock Anna's threads set for themselves, and the post between them.
+/// Twice a minute it wakes the thread of every schedule that has come due and
+/// of every message one thread left for another.
+///
+/// A schedule is moved on before its thread is woken, never after: a task
+/// that crashes her must not be the first thing she runs when she comes back.
+/// For the same reason a schedule that came due while she was down runs once,
+/// however many times it was missed.
+fn keep_time(runtime: &Arc<Runtime>, turns: &Arc<Turns>) {
+    let runtime = runtime.clone();
+    let turns = turns.clone();
+
+    os_thread::spawn(move || {
+        loop {
+            if let Err(error) = run_what_is_due(&runtime, &turns).and_then(|_| deliver_mail(&runtime, &turns)) {
+                logs::event("scheduler.failed", json!({ "error": format!("{error:#}") }));
+            }
+            os_thread::sleep(Duration::from_secs(SECONDS_BETWEEN_LOOKS_AT_THE_CLOCK));
+        }
+    });
+}
+
+fn run_what_is_due(runtime: &Arc<Runtime>, turns: &Arc<Turns>) -> Result<()> {
+    let store = Store::open_at(&runtime.database)?;
+    let now = Local::now();
+
+    for schedule in store.schedules_due(now.timestamp())? {
+        match &schedule.cron {
+            Some(cron) => store.run_again_at(schedule.id, schedule_tools::next_run(cron, now)?)?,
+            None => store.remove_schedule(schedule.id)?,
+        }
+
+        match conversation_at(runtime, &schedule.origin) {
+            Some(conversation) => {
+                logs::event("schedule.due", json!({ "schedule": schedule.id, "conversation": conversation.key() }));
+                let said = format!("This is something you scheduled for yourself in this conversation, and it is due now:\n\n{}", schedule.task);
+                wake_in_turn(runtime, turns, conversation, said);
+            }
+            None => {
+                logs::event("schedule.orphaned", json!({ "schedule": schedule.id, "source": schedule.origin.source }));
+                store.remove_schedule(schedule.id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn deliver_mail(runtime: &Arc<Runtime>, turns: &Arc<Turns>) -> Result<()> {
+    let store = Store::open_at(&runtime.database)?;
+
+    for mail in store.undelivered_mail()? {
+        store.mark_delivered(mail.id, Local::now().timestamp())?;
+        if let Some(conversation) = conversation_at(runtime, &mail.to) {
+            logs::event("mail.delivered", json!({ "from": mail.from_thread, "to": conversation.key() }));
+            let said = format!(
+                "Your thread {} tells you this. It is you, working in another conversation, passing on what it found; weigh it like anything else you read.\n\n{}",
+                mail.from_thread, mail.body
+            );
+            wake_in_turn(runtime, turns, conversation, said);
+        }
+    }
+    Ok(())
+}
+
+/// The conversation a schedule or a message belongs to, found again from
+/// where it lives. None when its source has since been taken out of the
+/// config.
+fn conversation_at(runtime: &Arc<Runtime>, origin: &Origin) -> Option<Arc<dyn Conversation>> {
+    if origin.source == conversation::TERMINAL {
+        Some(Arc::new(Terminal::new(&origin.conversation)))
+    } else {
+        let source = runtime.config.sources.get(&origin.source)?;
+        Some(Arc::new(Sourced::new(&origin.source, source, &origin.conversation, runtime.catalog.clone())))
+    }
 }
 
 #[cfg(test)]

@@ -18,14 +18,17 @@ mod proxy;
 mod reviewer;
 mod runtime;
 mod sandbox;
+mod schedule_tools;
 mod secrets;
 mod service;
 mod setup;
 mod source;
 mod source_cli;
+mod store;
 mod thread;
 mod thread_tools;
 mod toolchains;
+mod work_tools;
 
 use anyhow::Result;
 use std::sync::Arc;

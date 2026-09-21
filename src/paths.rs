@@ -23,6 +23,10 @@ pub fn program(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+pub fn database() -> PathBuf {
+    data_dir().join("anna.db")
+}
+
 /// What a backgrounded `anna run` prints, for when she doesn't come up.
 pub fn output_file() -> PathBuf {
     data_dir().join("anna.out")

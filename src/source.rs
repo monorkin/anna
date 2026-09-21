@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::{Call, Pointers, Source};
-use crate::conversation::Conversation;
+use crate::conversation::{Conversation, Origin};
 use crate::mcp::Catalog;
 use crate::paths;
 
@@ -106,6 +106,7 @@ impl Seen {
 /// with, and the thread is told to use the server's own tools.
 pub struct Sourced {
     key: String,
+    source_name: String,
     conversation: String,
     server: String,
     reply: Option<Call>,
@@ -116,6 +117,7 @@ impl Sourced {
     pub fn new(source_name: &str, source: &Source, conversation: &str, catalog: Arc<Catalog>) -> Sourced {
         Sourced {
             key: format!("{source_name}-{}", key_part(conversation)),
+            source_name: source_name.to_string(),
             conversation: conversation.to_string(),
             server: source.server.clone(),
             reply: source.reply.clone(),
@@ -127,6 +129,13 @@ impl Sourced {
 impl Conversation for Sourced {
     fn key(&self) -> &str {
         &self.key
+    }
+
+    fn origin(&self) -> Origin {
+        Origin {
+            source: self.source_name.clone(),
+            conversation: self.conversation.clone(),
+        }
     }
 
     fn say(&self, text: &str) -> Result<()> {

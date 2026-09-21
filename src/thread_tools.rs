@@ -236,6 +236,13 @@ mod tests {
             "recorded"
         }
 
+        fn origin(&self) -> crate::conversation::Origin {
+            crate::conversation::Origin {
+                source: "test".to_string(),
+                conversation: "recorded".to_string(),
+            }
+        }
+
         fn say(&self, text: &str) -> Result<()> {
             self.said.lock().unwrap().push(text.to_string());
             Ok(())
