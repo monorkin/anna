@@ -96,10 +96,10 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
     let memory = Supervision::begin(&directory, &key)?;
     let message = with_the_board(runtime, conversation.as_ref(), message);
     let role = role(runtime, standing, answered_otherwise.as_deref());
-    let mut command = turn(&directory, &endpoint, &session, standing, &role, &message)?;
+    let mut command = turn(&directory, &endpoint, &session, standing, &role)?;
     memory.cover(&mut command);
 
-    let outcome = claude::reply_of(&mut command, runtime.outside.time_limit, None);
+    let outcome = claude::reply_of(&mut command, &message, runtime.outside.time_limit, None);
     memory.finish();
     hands.discard_all();
 
@@ -201,12 +201,12 @@ fn random_uuid() -> Result<String> {
     Ok(format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]))
 }
 
-fn turn(directory: &Path, endpoint: &Endpoint, session: &Session, standing: Standing, role: &str, message: &str) -> Result<Command> {
+fn turn(directory: &Path, endpoint: &Endpoint, session: &Session, standing: Standing, role: &str) -> Result<Command> {
     let mut command = Command::new(claude::binary()?);
     command
         .current_dir(directory)
         .env("MCP_TOOL_TIMEOUT", TOOL_TIMEOUT_MILLISECONDS)
-        .args(["-p", message, "--dangerously-skip-permissions", "--strict-mcp-config"])
+        .args(["--dangerously-skip-permissions", "--strict-mcp-config"])
         .args(["--mcp-config", &broker::mcp_config(endpoint.socket())])
         .args(["--append-system-prompt", role]);
     if standing == Standing::CanAssignWork {

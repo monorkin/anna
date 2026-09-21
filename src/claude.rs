@@ -86,17 +86,29 @@ impl Started {
     }
 }
 
-pub fn reply_of(command: &mut Command, limit: Duration, started: Option<&Started>) -> Result<Reply> {
+/// One headless run. What claude is told goes in on stdin, never as an
+/// argument: arguments are there for every user of the machine to read, and
+/// what people write to Anna is not theirs to see. They also have a size
+/// limit that a long review would run into.
+pub fn reply_of(command: &mut Command, told: &str, limit: Duration, started: Option<&Started>) -> Result<Reply> {
     if started.is_some_and(|it| it.is_over()) {
         bail!("the turn this was for is over");
     }
-    let child = command
-        .args(["--output-format", "json"])
-        .stdin(Stdio::null())
+    let mut child = command
+        .args(["-p", "--output-format", "json"])
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .context("could not run claude")?;
+
+    // On the side: more than a pipe holds would otherwise wait for claude to
+    // read while claude waits for us to read what it prints
+    let mut stdin = child.stdin.take().context("claude has no stdin")?;
+    let told = told.to_string();
+    thread::spawn(move || {
+        let _ = stdin.write_all(told.as_bytes());
+    });
 
     let process = child.id();
     let watch = Watch::over(process, limit);
@@ -296,12 +308,14 @@ mod tests {
     #[test]
     fn a_run_is_stopped_when_its_time_is_up() {
         let mut quick = Command::new("sh");
-        quick.args(["-c", r#"echo '{"result":"done","session_id":"s1"}'"#]);
-        assert_eq!(reply_of(&mut quick, Duration::from_secs(10), None).unwrap().result, "done");
+        quick.args(["-c", r#"read told; echo "{\"result\":\"heard: $told\",\"session_id\":\"s1\"}""#]);
+        let reply = reply_of(&mut quick, "fix the login", Duration::from_secs(10), None).unwrap();
+        assert_eq!(reply.result, "heard: fix the login", "what claude is told arrives on stdin");
+        assert!(!quick.get_args().any(|it| it.to_string_lossy().contains("fix the login")), "and never as an argument");
 
         let mut endless = Command::new("sh");
         endless.args(["-c", "setsid sleep 31.4159 & wait"]);
-        let error = reply_of(&mut endless, Duration::from_millis(300), None).unwrap_err();
+        let error = reply_of(&mut endless, "", Duration::from_millis(300), None).unwrap_err();
         assert!(error.downcast_ref::<OutOfTime>().is_some());
         thread::sleep(Duration::from_millis(100));
         assert!(!still_running("31.4159"), "a command in its own session outlived the stop");
@@ -310,7 +324,7 @@ mod tests {
 
         let mut failing = Command::new("sh");
         failing.args(["-c", r#"echo '{"result":"no quota","session_id":"s2","is_error":true}'"#]);
-        assert!(reply_of(&mut failing, Duration::from_secs(10), None).unwrap_err().to_string().contains("no quota"));
+        assert!(reply_of(&mut failing, "", Duration::from_secs(10), None).unwrap_err().to_string().contains("no quota"));
     }
 
     #[test]
@@ -320,7 +334,7 @@ mod tests {
         let hand = thread::spawn(move || {
             let mut working = Command::new("sh");
             working.args(["-c", "setsid sleep 27.1828 & wait"]);
-            reply_of(&mut working, Duration::from_secs(60), Some(&for_the_hand))
+            reply_of(&mut working, "", Duration::from_secs(60), Some(&for_the_hand))
         });
 
         thread::sleep(Duration::from_millis(300));
@@ -331,7 +345,7 @@ mod tests {
 
         let mut late = Command::new("sh");
         late.args(["-c", "echo '{}'"]);
-        let refused = reply_of(&mut late, Duration::from_secs(10), Some(&started)).unwrap_err();
+        let refused = reply_of(&mut late, "", Duration::from_secs(10), Some(&started)).unwrap_err();
         assert_eq!(refused.to_string(), "the turn this was for is over");
     }
 

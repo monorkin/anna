@@ -93,7 +93,7 @@ impl Hand {
         };
 
         let mut command = sandbox.claude(&claude::binary()?);
-        command.args(["-p", brief, "--dangerously-skip-permissions", "--strict-mcp-config"]);
+        command.args(["--dangerously-skip-permissions", "--strict-mcp-config"]);
         if self.granted.is_some() {
             command.args(["--mcp-config", &broker::mcp_config(Path::new(sandbox::BROKER_INSIDE))]);
         }
@@ -101,7 +101,7 @@ impl Hand {
             command.args(["--resume", session]);
         }
 
-        let reply = claude::reply_of(&mut command, outside.time_limit, Some(started));
+        let reply = claude::reply_of(&mut command, brief, outside.time_limit, Some(started));
         // Where there was no repository the sandbox covers .git, which leaves
         // an empty folder behind; only an empty one can be removed this way
         let _ = fs::remove_dir(self.project.join(".git"));
