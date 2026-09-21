@@ -21,6 +21,9 @@ pub const JEV_API_KEY: &str = "jev_api_key";
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Config {
+    /// What the agent calls itself. Anna, unless setup said otherwise.
+    #[serde(default = "anna")]
+    pub name: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp_servers: BTreeMap<String, McpServer>,
     /// Where people talk to Anna, by name.
@@ -47,6 +50,10 @@ fn an_hour() -> u64 {
     60
 }
 
+fn anna() -> String {
+    "Anna".to_string()
+}
+
 fn yes() -> bool {
     true
 }
@@ -58,6 +65,7 @@ fn is_yes(value: &bool) -> bool {
 impl Default for Config {
     fn default() -> Config {
         Config {
+            name: anna(),
             mcp_servers: BTreeMap::new(),
             sources: BTreeMap::new(),
             people: BTreeMap::new(),
@@ -86,6 +94,14 @@ pub struct Source {
     pub id: Pointers,
     pub conversation: String,
     pub sender: String,
+    /// What to call the sender, for a source that listens to anyone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<String>,
+    /// Listen to everyone who can reach her here, not only to `people`. For
+    /// a source that already decides who that is: an agent in Basecamp only
+    /// hears from the projects it was added to.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub anyone: bool,
     /// What the thread is told. Several pointers when a source splits it up —
     /// a title, an excerpt, and a link to read the rest.
     pub text: Pointers,

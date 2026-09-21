@@ -35,7 +35,7 @@ use crate::thread_tools::{Dismiss, Hands, Reply, SendBack, StartHand, Workshop};
 
 const TOOL_TIMEOUT_MILLISECONDS: &str = "7200000";
 
-const WHO: &str = "You are Anna, working as a colleague rather than a tool. Someone is talking to you in a conversation.";
+const WHO: &str = "working as a colleague rather than a tool. Someone is talking to you in a conversation.";
 
 const SPEAKING_WITH_THE_REPLY_TOOL: &str =
     "The reply tool is the only way they hear from you, so use it for every answer, question, and update.";
@@ -198,7 +198,7 @@ fn turn(directory: &Path, endpoint: &Endpoint, session: &Session, role: &str, me
 
 fn role(runtime: &Runtime, answered_otherwise: Option<&str>) -> String {
     let speaking = answered_otherwise.unwrap_or(SPEAKING_WITH_THE_REPLY_TOOL);
-    let mut role = format!("{WHO} {speaking} {WORKING}");
+    let mut role = format!("You are {}, {WHO} {speaking} {WORKING}", runtime.config.name);
     if let Some(personality) = &runtime.personality {
         role.push_str("\n\n");
         role.push_str(personality);

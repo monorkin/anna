@@ -20,12 +20,12 @@ pub fn installed() -> bool {
     unit_path().is_some_and(|it| it.exists())
 }
 
-pub fn install(start_at_boot: bool) -> Result<()> {
+pub fn install(agent: &str, start_at_boot: bool) -> Result<()> {
     let path = unit_path().context("could not determine the home directory")?;
     let executable = std::env::current_exe().context("could not determine Anna's own path")?;
     let search_path = std::env::var("PATH").unwrap_or_default();
 
-    fsutil::write_private(&path, &unit(&executable, &search_path))?;
+    fsutil::write_private(&path, &unit(agent, &executable, &search_path))?;
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", NAME])?;
     if start_at_boot {
@@ -50,10 +50,11 @@ pub fn active() -> bool {
         .is_ok_and(|it| it.success())
 }
 
-fn unit(executable: &Path, search_path: &str) -> String {
+fn unit(agent: &str, executable: &Path, search_path: &str) -> String {
+    let description: String = agent.chars().filter(|it| !it.is_control()).collect();
     format!(
         "[Unit]\n\
-         Description=Anna\n\
+         Description={description}\n\
          After=network-online.target\n\
          \n\
          [Service]\n\
@@ -107,8 +108,9 @@ mod tests {
 
     #[test]
     fn the_unit_runs_anna_with_the_path_she_was_set_up_with() {
-        let unit = unit(Path::new("/opt/anna/bin/anna"), "/opt/tools/bin:/usr/bin");
+        let unit = unit("Botten\nExecStartPre=/bin/evil", Path::new("/opt/anna/bin/anna"), "/opt/tools/bin:/usr/bin");
 
+        assert!(unit.contains("Description=BottenExecStartPre=/bin/evil\n"));
         assert!(unit.contains("ExecStart=/opt/anna/bin/anna run\n"));
         assert!(unit.contains("Environment=PATH=/opt/tools/bin:/usr/bin\n"));
         assert!(unit.contains("KillMode=control-group\n"));

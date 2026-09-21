@@ -44,10 +44,25 @@ source:
   and which commands she runs as MCP servers. Tokens aren't in it: the Jev key
   goes to the keyring through `secret-tool`, or to a 600 `secrets.json` when
   no keyring answers (`ANNA_KEYRING=off` forces the file).
-- `anna setup` as a wizard in steps: prerequisites, Claude accounts, the Jev
-  key typed without echo and checked against the API before it is kept, style,
-  CLAUDE.md, people, MCP servers, and whether to install a systemd user
-  service (with lingering, if she should run while nobody is logged in).
+- `anna setup`, with colour and a rail down each question (plain when piped,
+  in a dumb terminal, or with NO_COLOR). The walk: a name for the agent — it
+  goes into the config, the thread's role and the service — then About, which
+  becomes CLAUDE.md, and Style, both written in $EDITOR (or typed in place and
+  ended with a lone dot); run at startup, which installs the systemd user
+  service with lingering; Jev, and the key typed without echo and checked
+  before it is kept. Then one block per tool whose command line is installed:
+  Basecamp, HEY, Fizzy. It closes with how to add any MCP server.
+- A tool is given to the agent as itself or as you, and only the first
+  listens. As a Basecamp agent it gets its own CLI profile, the verified
+  Basecamp source with `anyone: true` — Basecamp already decides who can reach
+  an agent — and `basecamp watch` as the trigger when that command exists. As
+  you, it gets the MCP server and no source: everything addressed to you would
+  wake it, and it would answer your colleagues in your name.
+  Not run: the agent branch. It hands the terminal to Claude with the pasted
+  instruction and where the token has to end up, which is what Basecamp's
+  instruction is written for, but the feature is staff-only and the CLI has no
+  agent login of its own yet. `fizzy mcp` is assumed; Fizzy isn't installed
+  here.
 - The control socket, and `anna start`, `stop`, `status`, `poke`. Start and
   stop go through systemd when the service is installed. Stopping — by
   command, ctrl+c or SIGTERM — kills everything below her and removes her

@@ -21,6 +21,7 @@ pub struct Message {
     pub id: String,
     pub conversation: String,
     pub sender: String,
+    pub sender_name: Option<String>,
     pub text: String,
 }
 
@@ -38,6 +39,7 @@ pub fn messages_in(source: &Source, answer: &str) -> Result<Vec<Message>> {
                 id: all_at(item, &source.id, ":")?,
                 conversation: text_at(item, &source.conversation)?,
                 sender: text_at(item, &source.sender)?,
+                sender_name: source.sender_name.as_deref().and_then(|it| text_at(item, it)),
                 text: all_at(item, &source.text, "\n\n")?,
             })
         })
@@ -237,6 +239,7 @@ mod tests {
                 id: "11".to_string(),
                 conversation: "900".to_string(),
                 sender: "marta@example.com".to_string(),
+                sender_name: None,
                 text: "Can you look at this?".to_string(),
             }]
         );

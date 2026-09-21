@@ -258,7 +258,7 @@ fn check(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Source
 }
 
 fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Source, message: Message) {
-    let Some(person) = runtime.config.people.get(&message.sender).cloned() else {
+    let Some(person) = heard_as(runtime, source, &message) else {
         logs::event("message.ignored", json!({ "source": name, "sender": message.sender }));
         return;
     };
@@ -279,6 +279,17 @@ fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Sou
     }
 
     wake_in_turn(runtime, turns, conversation, format!("{person} says, on {name}:\n\n{}", message.text));
+}
+
+/// Who a message is heard as, or nobody. Someone in `people` is always heard,
+/// under the name given there. Anyone else only on a source that listens to
+/// everyone who can reach it.
+fn heard_as(runtime: &Runtime, source: &Source, message: &Message) -> Option<String> {
+    match runtime.config.people.get(&message.sender) {
+        Some(person) => Some(person.clone()),
+        None if source.anyone => Some(message.sender_name.clone().unwrap_or_else(|| message.sender.clone())),
+        None => None,
+    }
 }
 
 /// Wakes the conversation's thread on a thread of its own, after whatever

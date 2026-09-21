@@ -33,6 +33,7 @@ pub fn check(name: &str) -> Result<()> {
     for message in &messages {
         let listened_to = match config.people.get(&message.sender) {
             Some(person) => format!("listens to: {person}"),
+            None if source.anyone => "listens to: anyone here".to_string(),
             None => "ignored: not in people".to_string(),
         };
         println!();

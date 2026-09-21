@@ -15,6 +15,7 @@ mod logs;
 mod mcp;
 mod mcp_cli;
 mod paths;
+mod prompt;
 mod proxy;
 mod reviewer;
 mod runtime;
