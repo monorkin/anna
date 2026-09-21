@@ -132,10 +132,36 @@ pub fn reply_of(command: &mut Command, told: &str, limit: Duration, started: Opt
         )
     })?;
 
+    if reply.is_error && says_the_subscription_is_used_up(&reply.result) {
+        return Err(OutOfQuota { said: reply.result }.into());
+    }
     if reply.is_error {
         bail!("claude reported an error: {}", reply.result);
     }
     Ok(reply)
+}
+
+/// The subscription's allowance is used up for now. Nothing is wrong and
+/// nothing was started: the same run will work later, so callers can tell it
+/// from a failure and wait.
+#[derive(Debug)]
+pub struct OutOfQuota {
+    pub said: String,
+}
+
+impl std::fmt::Display for OutOfQuota {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "the Claude subscription is used up for now: {}", self.said)
+    }
+}
+
+impl std::error::Error for OutOfQuota {}
+
+/// Claude Code says it in a sentence, not a code: "You've hit your session
+/// limit · resets 8:20pm", "Claude usage limit reached".
+fn says_the_subscription_is_used_up(said: &str) -> bool {
+    let said = said.to_lowercase();
+    said.contains("limit") && ["session", "usage", "weekly", "resets", "reached"].iter().any(|it| said.contains(it))
 }
 
 /// Stops a process, and everything it started, if it is still going when its
@@ -325,6 +351,18 @@ mod tests {
         let mut failing = Command::new("sh");
         failing.args(["-c", r#"echo '{"result":"no quota","session_id":"s2","is_error":true}'"#]);
         assert!(reply_of(&mut failing, "", Duration::from_secs(10), None).unwrap_err().to_string().contains("no quota"));
+    }
+
+    #[test]
+    fn a_used_up_subscription_is_told_apart_from_something_going_wrong() {
+        let mut used_up = Command::new("sh");
+        used_up.args(["-c", r#"echo '{"result":"You have hit your session limit · resets 8:20pm (Europe/Zagreb)","session_id":"s1","is_error":true}'"#]);
+        let error = reply_of(&mut used_up, "", Duration::from_secs(10), None).unwrap_err();
+        assert!(error.context("the thread could not finish its turn").downcast_ref::<OutOfQuota>().is_some(), "and still is once it has been given context");
+
+        assert!(says_the_subscription_is_used_up("Claude usage limit reached. Your limit will reset at 9pm."));
+        assert!(!says_the_subscription_is_used_up("Invalid API key · Please run /login"));
+        assert!(!says_the_subscription_is_used_up("The file is over the size limit"));
     }
 
     #[test]

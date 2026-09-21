@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::thread as os_thread;
 use std::time::Duration;
 
-use crate::claude;
+use crate::claude::{self, OutOfQuota};
 use crate::clock;
 use crate::config::{self, Source, Trigger};
 use crate::control::{self, Controls};
@@ -42,6 +42,8 @@ const SECONDS_BETWEEN_ACCOUNT_CHECKS: u64 = 60;
 const SECONDS_BEFORE_RESTARTING_A_TRIGGER: u64 = 10;
 const SECONDS_BETWEEN_LOOKS_AT_THE_CLOCK: u64 = 30;
 const MOST_TURNS_WAITING: usize = 50;
+const SECONDS_BETWEEN_TRIES_FOR_QUOTA: u64 = 600;
+const MOST_WAITS_FOR_QUOTA: u32 = 120;
 
 /// What is waiting to be said in each conversation that has a turn going.
 /// A conversation's turns run one at a time and in the order they came: a
@@ -376,12 +378,30 @@ fn wake_in_turn(runtime: &Arc<Runtime>, turns: &Arc<Turns>, conversation: Arc<dy
     turns.add(
         &key,
         Box::new(move || {
-            if let Err(error) = thread::wake(&runtime, conversation.clone(), standing, &said) {
+            if let Err(error) = wake_once_there_is_quota(&runtime, &conversation, standing, &said) {
                 logs::event("thread.failed", json!({ "conversation": conversation.key(), "error": format!("{error:#}") }));
                 let _ = conversation.say("Something broke on my side before I could finish this. I've logged it; ask me again and I'll pick it back up.");
             }
         }),
     );
+}
+
+/// A subscription that is used up is a wait, not a failure: what she was
+/// asked stays asked, at the head of its conversation, and is tried again
+/// until the allowance is back — or another account has been switched to in
+/// the meantime. Only after most of a day is it given up as broken.
+fn wake_once_there_is_quota(runtime: &Runtime, conversation: &Arc<dyn Conversation>, standing: Standing, said: &str) -> Result<()> {
+    let mut waits = 0;
+    loop {
+        match thread::wake(runtime, conversation.clone(), standing, said) {
+            Err(error) if error.downcast_ref::<OutOfQuota>().is_some() && waits < MOST_WAITS_FOR_QUOTA => {
+                waits += 1;
+                logs::event("thread.waiting_for_quota", json!({ "conversation": conversation.key(), "waits": waits, "said": format!("{error:#}") }));
+                os_thread::sleep(Duration::from_secs(SECONDS_BETWEEN_TRIES_FOR_QUOTA));
+            }
+            outcome => return outcome,
+        }
+    }
 }
 
 /// The clock Anna's threads set for themselves, and the post between them.
