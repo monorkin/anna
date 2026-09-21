@@ -111,6 +111,18 @@ source:
   URL and how you answer depends on what you're answering — the thread then
   gets no reply tool and is told to answer with Basecamp's own. Long
   conversation ids (sgids) are hashed so they fit a socket path.
+- That was Basecamp as a person. **As an agent** the first real run got
+  "Access denied": Basecamp refuses an agent every controller that hasn't
+  opened itself to agents, notifications included. An agent has an inbox of
+  its own instead (`basecamp_eventfeed` / `poll_inbox`): every event that
+  reached it and why, read from a position, with people reported by id. So a
+  source can carry a `cursor` — a pointer into the answer whose value goes
+  into the next call, kept on disk, moved only when nothing in the answer was
+  held back — and a `note` said to the thread with every message, here that
+  an item is an event and the recording has to be read first. Both are
+  generic; setup knows the inbox's shape, and looks up the ids of the people
+  it is told to trust, in every profile and account the person has. Checked
+  against the real inbox once, dry: it answers.
 - `anna source check <name>` reads a source once and shows what Anna would
   make of it, without remembering or waking anything. Run read-only against
   the real server: 23 of 23 notifications parsed.

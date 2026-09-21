@@ -563,18 +563,36 @@ impl Doing for Machine {
     }
 
     /// Asked as the person running setup, who can see people; an agent
-    /// can't. Every account they are in is looked through, since which one
-    /// the agent belongs to is the command line's to know, and an id is only
+    /// can't. Every account of every profile they have is looked through:
+    /// which account the agent belongs to is the command line's to know, the
+    /// default profile may not be the one that can see it, and an id is only
     /// ever one person's.
     fn person_ids(&mut self, tool: &str, address: &str) -> Vec<String> {
-        let accounts = self.accounts(tool, None).unwrap_or_default();
-        accounts
+        let mut profiles: Vec<Option<String>> = json_from(tool, &["profile", "list", "--json"])
+            .and_then(|listed| listed["data"].as_array().cloned())
+            .unwrap_or_default()
             .iter()
-            .filter_map(|account| json_from(tool, &["people", "list", "--all", "--json", "--account", &account.id]))
-            .flat_map(|listed| listed["data"].as_array().cloned().unwrap_or_default())
-            .filter(|person| person["email_address"].as_str().is_some_and(|it| it.eq_ignore_ascii_case(address)))
-            .map(|person| person["id"].to_string().trim_matches('"').to_string())
-            .collect()
+            .filter_map(|it| it["name"].as_str().map(|name| Some(name.to_string())))
+            .collect();
+        if profiles.is_empty() {
+            profiles.push(None);
+        }
+
+        let mut ids = Vec::new();
+        for profile in &profiles {
+            let through: Vec<&str> = profile.as_deref().map(|it| vec!["--profile", it]).unwrap_or_default();
+            for account in self.accounts(tool, profile.as_deref()).unwrap_or_default() {
+                let listing = [through.as_slice(), &["people", "list", "--all", "--json", "--account", &account.id]].concat();
+                let people = json_from(tool, &listing).and_then(|listed| listed["data"].as_array().cloned()).unwrap_or_default();
+                for person in people.iter().filter(|it| it["email_address"].as_str().is_some_and(|it| it.eq_ignore_ascii_case(address))) {
+                    let id = person["id"].to_string().trim_matches('"').to_string();
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+        ids
     }
 
     fn accounts(&mut self, tool: &str, profile: Option<&str>) -> Result<Vec<Account>> {
