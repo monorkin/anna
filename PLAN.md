@@ -236,6 +236,9 @@ worst of them ways around the trust tiers. What changed because of it:
   over stops its hands and reviewers and closes its endpoint. Turns in a
   conversation run in the order they came, from a bounded queue. One Anna at
   a time and one turn per conversation at a time, held by kernel locks.
+  katami named its hook socket and overlay after the process alone, so two
+  conversations at once took each other's; each supervised session has its
+  own now (katami b7e745e).
 - **Not losing things.** A message that couldn't be checked is tried again
   instead of consumed. Seen ids and every private file are written whole and
   moved into place. Migrations take the write lock before reading the
@@ -255,10 +258,6 @@ Still open from the review:
 - **Standing doesn't survive history or memory.** Trusted and untrusted turns
   share one session, and katami's reviewer takes any "user" turn as evidence.
   Needs katami's `origin` and speaker (already on the list below).
-- katami named its hook socket and overlay after the process alone, so two
-  conversations at once took each other's. Fixed in katami's checkout
-  (`paths::name_for_one_session`); it reaches Anna when katami is pushed and
-  her lockfile bumped.
 - The editor only sees arguments marked as prose; an unmarked posting tool
   still posts unedited from a thread.
 - Mail is marked delivered when it is queued, not when its turn ran. Seen ids
