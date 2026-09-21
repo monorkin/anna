@@ -143,7 +143,7 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
-fn runtime_dir() -> PathBuf {
+pub fn runtime_dir() -> PathBuf {
     if let Some(dir) = env::var_os("XDG_RUNTIME_DIR").filter(|it| !it.is_empty()) {
         PathBuf::from(dir).join("anna")
     } else {
@@ -151,6 +151,6 @@ fn runtime_dir() -> PathBuf {
     }
 }
 
-fn home() -> PathBuf {
+pub fn home() -> PathBuf {
     dirs::home_dir().expect("could not determine the home directory")
 }

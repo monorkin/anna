@@ -49,7 +49,9 @@ impl Sandbox<'_> {
     pub fn claude(&self, claude_binary: &Path) -> Command {
         let mut command = Command::new("bwrap");
         command
-            .args(["--unshare-all", "--die-with-parent"])
+            // Nothing of Anna's environment goes in: whatever tokens she was
+            // started with are hers, and what a session needs is set below
+            .args(["--unshare-all", "--die-with-parent", "--clearenv"])
             .args(["--ro-bind", "/usr", "/usr"])
             .args(["--symlink", "usr/bin", "/bin"])
             .args(["--symlink", "usr/lib", "/lib"])
@@ -83,6 +85,7 @@ impl Sandbox<'_> {
         command
             .args(["--chdir", "/work"])
             .args(["--setenv", "HOME", "/home/hand"])
+            .args(["--setenv", "LANG", "C.UTF-8"])
             .args(["--setenv", "PATH", &self.outside.toolchains.path()])
             .args(["--setenv", "CLAUDE_CONFIG_DIR", "/profile"])
             .args(["--setenv", "HTTPS_PROXY", "http://127.0.0.1:3128"])
@@ -93,8 +96,17 @@ impl Sandbox<'_> {
     fn bind_project(&self, command: &mut Command) {
         if self.writable {
             command.arg("--bind").arg(&self.project).arg("/work");
-            if self.project.join(".git").is_dir() {
+            let git = self.project.join(".git");
+            if git.join("HEAD").is_file() {
                 self.lock_git(command);
+            } else if git.is_file() {
+                // A worktree's .git is a file that says where the real one
+                // is; rewritten, it would point the brain's git anywhere
+                command.arg("--ro-bind").arg(&git).arg("/work/.git");
+            } else {
+                // Starting a repository is the brain's to do. A hand that
+                // could would write the hooks and config of one from scratch
+                command.args(["--tmpfs", "/work/.git", "--remount-ro", "/work/.git"]);
             }
         } else {
             command.arg("--ro-bind").arg(&self.project).arg("/work");
@@ -146,6 +158,7 @@ mod tests {
         let project = std::env::temp_dir().join(format!("anna-sandbox-{}", std::process::id()));
         fs::create_dir_all(project.join(".git/hooks")).unwrap();
         fs::write(project.join(".git/config"), "").unwrap();
+        fs::write(project.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         let project_path = project.to_str().unwrap();
 
         let outside = Outside {
@@ -175,6 +188,43 @@ mod tests {
         assert!(!arguments.iter().any(|it| it == BROKER_INSIDE));
 
         fs::remove_dir_all(project).unwrap();
+    }
+
+    /// The real thing, with a shell where Claude would be: what the session
+    /// would find in its environment and be able to do to the project.
+    #[test]
+    fn a_hand_gets_none_of_annas_environment_and_cannot_start_or_repoint_a_repository() {
+        if crate::paths::program("bwrap").is_none() || crate::paths::program("socat").is_none() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("anna-sandbox-real-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let plain = root.join("plain");
+        let worktree = root.join("worktree");
+        fs::create_dir_all(&plain).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(root.join("profile")).unwrap();
+        fs::write(worktree.join(".git"), "gitdir: /somewhere/real\n").unwrap();
+        fs::write(root.join("proxy.sock"), "").unwrap();
+
+        let outside = Outside { proxy_socket: root.join("proxy.sock"), toolchains: Toolchains::default(), time_limit: Duration::from_secs(60) };
+        let run = |project: &Path, script: &str| {
+            let sandbox = Sandbox { project: project.to_path_buf(), profile: root.join("profile"), outside: &outside, broker_socket: None, writable: true };
+            let output = sandbox.claude(Path::new("/usr/bin/bash")).args(["-c", script]).env("ANNA_TEST_SECRET", "s3cret").output().unwrap();
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+
+        let environment = run(&plain, "env");
+        assert!(!environment.contains("ANNA_TEST_SECRET"), "{environment}");
+        assert!(environment.contains("HOME=/home/hand"));
+
+        let attempts = "touch made-it; (mkdir -p .git/hooks && echo 'evil' > .git/hooks/pre-commit) 2>/dev/null && echo started; echo 'gitdir: /evil' > .git 2>/dev/null && echo repointed; echo done";
+        assert_eq!(run(&plain, attempts).trim(), "done");
+        assert!(plain.join("made-it").exists(), "the project itself is still writable");
+        assert_eq!(run(&worktree, attempts).trim(), "done");
+        assert_eq!(fs::read_to_string(worktree.join(".git")).unwrap(), "gitdir: /somewhere/real\n");
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

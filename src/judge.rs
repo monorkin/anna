@@ -192,6 +192,28 @@ fn excerpt(text: &str) -> String {
     text.chars().take(120).collect()
 }
 
+/// A judge for tests elsewhere: a Jev on this machine that answers each
+/// question with the next probability, so nothing real is ever asked.
+#[cfg(test)]
+pub fn answering(probabilities: &[f64]) -> Judge {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
+    let probabilities = probabilities.to_vec();
+    std::thread::spawn(move || {
+        for probability in probabilities {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0; 8192];
+            let _ = connection.read(&mut request);
+            let body = json!({ "answers": { "answer": { "type": "noul", "noul": probability } } }).to_string();
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            connection.write_all(response.as_bytes()).unwrap();
+        }
+    });
+    Judge::Jev { api_key: "key".to_string(), url, breaker: Breaker::default() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

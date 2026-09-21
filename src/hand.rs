@@ -38,6 +38,7 @@ impl Hand {
         if !project.is_dir() {
             bail!("{} is not a folder", project.display());
         }
+        refuse_what_is_not_a_project(&project, &paths::home(), &[paths::config_dir(), paths::data_dir(), paths::runtime_dir()])?;
 
         let id = format!("h{:x}", clock::nanos());
         let directory = paths::sessions_dir().join(&id);
@@ -100,7 +101,11 @@ impl Hand {
             command.args(["--resume", session]);
         }
 
-        let reply = claude::reply_of(&mut command, outside.time_limit)?;
+        let reply = claude::reply_of(&mut command, outside.time_limit);
+        // Where there was no repository the sandbox covers .git, which leaves
+        // an empty folder behind; only an empty one can be removed this way
+        let _ = fs::remove_dir(self.project.join(".git"));
+        let reply = reply?;
         logs::event("hand.reported", json!({ "hand": self.id, "session": reply.session_id }));
         self.session = Some(reply.session_id);
         Ok(reply.result)
@@ -109,5 +114,55 @@ impl Hand {
     pub fn discard(self) {
         let _ = fs::remove_dir_all(&self.directory);
         logs::event("hand.discarded", json!({ "hand": self.id }));
+    }
+}
+
+/// A hand writes its project, and the brain acts on what it finds there, so
+/// a project is never a folder that holds what Anna or the person runs on:
+/// her own state, the home folder itself or anything above it, or a
+/// dot-folder in it — keys, configs, other tools' credentials. Whoever asks
+/// for the hand doesn't matter; this is what keeps someone who can only hand
+/// out work from writing her schedules or her config through one.
+fn refuse_what_is_not_a_project(project: &Path, home: &Path, her_own: &[PathBuf]) -> Result<()> {
+    let settled: Vec<PathBuf> = her_own.iter().map(|it| it.canonicalize().unwrap_or_else(|_| it.clone())).collect();
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+
+    let touches_her_own = settled.iter().any(|it| project.starts_with(it) || it.starts_with(project));
+    let holds_home = home.starts_with(project);
+    let hidden_in_home = project
+        .strip_prefix(&home)
+        .ok()
+        .and_then(|inside| inside.components().next())
+        .is_some_and(|first| first.as_os_str().to_string_lossy().starts_with('.'));
+
+    if touches_her_own || holds_home || hidden_in_home {
+        bail!("{} is not a project folder: hands don't work in the home folder, in a dot-folder in it, or anywhere my own files are", project.display())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hand_is_kept_out_of_everything_that_is_not_a_project() {
+        let home = Path::new("/home/someone");
+        let her_own = [PathBuf::from("/srv/anna/config"), PathBuf::from("/srv/anna/data")];
+        let refused = |project: &str| refuse_what_is_not_a_project(Path::new(project), home, &her_own).is_err();
+
+        assert!(!refused("/home/someone/Work/frontdesk"));
+        assert!(!refused("/home/someone/Work/frontdesk/.claude/worktrees/fix"), "only a dot-folder right in home is off limits");
+        assert!(!refused("/srv/projects/frontdesk"));
+
+        assert!(refused("/srv/anna/data"), "her database lives here");
+        assert!(refused("/srv/anna/data/threads/t1"));
+        assert!(refused("/srv/anna"), "a folder that holds her state is as good as her state");
+        assert!(refused("/home/someone"));
+        assert!(refused("/home"));
+        assert!(refused("/"));
+        assert!(refused("/home/someone/.ssh"));
+        assert!(refused("/home/someone/.config/basecamp"));
     }
 }
