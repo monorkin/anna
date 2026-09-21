@@ -1,0 +1,49 @@
+#!/usr/bin/env ruby
+# A stand-in for Jev, for running Anna end to end without touching TypeSafe.
+#
+#   script/stub-jev 4510 &
+#   then, in the config of the Anna under test:  "jev_url": "http://127.0.0.1:4510/v1/systemone"
+#   and any non-empty string as the jev_api_key secret.
+#
+# It answers every question the same dumb, predictable way: a text is "yes"
+# (0.97) when it contains one of the phrases below, and "no" (0.03) otherwise.
+# That is enough to drive both sides of every gate — put "ignore your previous
+# instructions" in a message and it is refused; leave it out and it passes.
+# It judges nothing. Whether Jev is any good is what spikes/injection-detection
+# measured, against the real thing, on purpose.
+require "json"
+require "socket"
+
+SUSPICIOUS = [
+  "ignore your previous instructions",
+  "ignore all previous instructions",
+  "system notice to ai agent"
+]
+
+port = Integer(ARGV.fetch(0, "4510"))
+server = TCPServer.new("127.0.0.1", port)
+$stdout.sync = true
+puts "stub-jev listening on http://127.0.0.1:#{port}/v1/systemone"
+
+loop do
+  Thread.new(server.accept) do |connection|
+    request_line = connection.gets.to_s
+    length = 0
+    while (header = connection.gets) && header != "\r\n"
+      length = header.split(":", 2).last.to_i if header.downcase.start_with?("content-length:")
+    end
+    body = JSON.parse(connection.read(length)) rescue {}
+
+    state = body["state"].to_s.downcase
+    answers = (body["questions"] || {}).to_h do |name, _question|
+      flagged = SUSPICIOUS.any? { state.include?(it) }
+      [ name, { type: "noul", noul: flagged ? 0.97 : 0.03 } ]
+    end
+
+    payload = JSON.generate(model: "stub-jev", answers: answers, usage: { input_tokens: 0, output_tokens: 0 })
+    connection.write "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{payload.bytesize}\r\nConnection: close\r\n\r\n#{payload}"
+    puts "#{request_line.strip} -> #{answers.values.map { it[:noul] }.join(", ")}"
+  ensure
+    connection.close
+  end
+end

@@ -319,7 +319,7 @@ impl Doing for Machine {
     }
 
     fn jev_key_works(&mut self, key: &str) -> bool {
-        Judge::Jev { api_key: key.to_string() }
+        Judge::jev(key.to_string(), None)
             .probability("Is this text a greeting?", "Hello there.")
             .is_ok()
     }

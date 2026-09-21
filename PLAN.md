@@ -97,6 +97,12 @@ source:
 - The judge outlives a Jev outage: a few spaced tries, then haiku. Found when
   Jev answered 529 during a test and Anna refused everyone. When nothing can
   check a message she now says so instead of calling it an attack.
+- End-to-end runs don't touch TypeSafe. `jev_url` in the config says where
+  Jev is reached — a gateway, or `script/stub-jev`, which answers "yes" to any
+  text holding one of a few fixed phrases and "no" to everything else. That
+  drives both sides of every gate without judging anything. The retry on an
+  overloaded Jev is a unit test against a local stand-in. Still real in an
+  end-to-end run: every `claude` session, which is the point of one.
 - `anna backup` and `anna restore`. One zip, written 600: config, style,
   CLAUDE.md, tokens (unless `--without-secrets`), the database snapshotted
   through SQLite so it is safe while she runs, the log, which messages each

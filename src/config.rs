@@ -30,6 +30,10 @@ pub struct Config {
     /// knows them by. Anyone else is ignored.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub people: BTreeMap<String, String>,
+    /// Where Jev is reached, when not at TypeSafe directly: a gateway in
+    /// front of it, or a stand-in for runs that must not touch the real one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev_url: Option<String>,
     /// Set to false when something else already runs `ax auto-switch`.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub rotate_accounts: bool,
@@ -57,6 +61,7 @@ impl Default for Config {
             mcp_servers: BTreeMap::new(),
             sources: BTreeMap::new(),
             people: BTreeMap::new(),
+            jev_url: None,
             rotate_accounts: true,
             minutes_per_run: an_hour(),
         }

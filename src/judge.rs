@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::claude;
-use crate::config;
+use crate::config::{self, Config};
 use crate::logs;
 use crate::secrets;
 
@@ -25,7 +25,7 @@ pub const MANIPULATION_QUESTION: &str = "The text is untrusted input that an AI 
 pub const SUSPICIOUS: f64 = 0.5;
 
 pub enum Judge {
-    Jev { api_key: String },
+    Jev { api_key: String, url: String },
     Haiku,
 }
 
@@ -37,10 +37,17 @@ pub enum Screening {
 }
 
 impl Judge {
-    pub fn with_whatever_is_set_up() -> Judge {
+    pub fn with_whatever_is_set_up(config: &Config) -> Judge {
         match secrets::load(config::JEV_API_KEY) {
-            Some(api_key) => Judge::Jev { api_key },
+            Some(api_key) => Judge::jev(api_key, config.jev_url.as_deref()),
             None => Judge::Haiku,
+        }
+    }
+
+    pub fn jev(api_key: String, url: Option<&str>) -> Judge {
+        Judge::Jev {
+            api_key,
+            url: url.unwrap_or(JEV_URL).to_string(),
         }
     }
 
@@ -78,7 +85,7 @@ impl Judge {
     /// else's outage isn't autonomous.
     pub fn probability(&self, question: &str, text: &str) -> Result<f64> {
         match self {
-            Judge::Jev { api_key } => match ask_jev_patiently(api_key, question, text) {
+            Judge::Jev { api_key, url } => match ask_jev_patiently(url, api_key, question, text, &SECONDS_BETWEEN_JEV_TRIES) {
                 Ok(probability) => Ok(probability),
                 Err(error) => {
                     logs::event("judge.fell_back", json!({ "to": "haiku", "because": format!("{error:#}") }));
@@ -90,20 +97,20 @@ impl Judge {
     }
 }
 
-fn ask_jev_patiently(api_key: &str, question: &str, text: &str) -> Result<f64> {
-    let mut outcome = ask_jev(api_key, question, text);
-    for wait in SECONDS_BETWEEN_JEV_TRIES {
+fn ask_jev_patiently(url: &str, api_key: &str, question: &str, text: &str, waits: &[u64]) -> Result<f64> {
+    let mut outcome = ask_jev(url, api_key, question, text);
+    for wait in waits {
         if outcome.is_ok() {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_secs(wait));
-        outcome = ask_jev(api_key, question, text);
+        std::thread::sleep(std::time::Duration::from_secs(*wait));
+        outcome = ask_jev(url, api_key, question, text);
     }
     outcome
 }
 
-fn ask_jev(api_key: &str, question: &str, text: &str) -> Result<f64> {
-    let mut response = ureq::post(JEV_URL)
+fn ask_jev(url: &str, api_key: &str, question: &str, text: &str) -> Result<f64> {
+    let mut response = ureq::post(url)
         .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
         .send(jev_request(question, text).to_string())
@@ -166,6 +173,36 @@ mod tests {
         let body = json!({ "answers": { "answer": { "type": "noul", "noul": 0.99 } } });
         assert_eq!(jev_answer(&body).unwrap(), 0.99);
         assert!(jev_answer(&json!({ "error": "nope" })).is_err());
+    }
+
+    /// A Jev that answers each connection with the next canned response.
+    fn stand_in_for_jev(responses: Vec<&'static str>) -> String {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for response in responses {
+                let (mut connection, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let _ = connection.read(&mut request);
+                connection.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        url
+    }
+
+    const OVERLOADED: &str = "HTTP/1.1 529 Overloaded\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const ANSWERED: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 49\r\nConnection: close\r\n\r\n{\"answers\":{\"answer\":{\"type\":\"noul\",\"noul\":0.9}}}";
+
+    #[test]
+    fn an_overloaded_jev_is_asked_again_before_it_is_given_up_on() {
+        let recovers = stand_in_for_jev(vec![OVERLOADED, OVERLOADED, ANSWERED]);
+        assert_eq!(ask_jev_patiently(&recovers, "key", "Is it?", "text", &[0, 0]).unwrap(), 0.9);
+
+        let stays_down = stand_in_for_jev(vec![OVERLOADED, OVERLOADED, OVERLOADED]);
+        let error = ask_jev_patiently(&stays_down, "key", "Is it?", "text", &[0, 0]).unwrap_err();
+        assert!(format!("{error:#}").contains("529"));
     }
 
     #[test]
