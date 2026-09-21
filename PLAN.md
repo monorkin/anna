@@ -57,6 +57,11 @@ source:
   something happened pokes her, and she reads the source herself — a poke
   carries no message and no sender, so being able to poke isn't being able to
   speak as someone. The timer stays as the fallback.
+- Triggers. A source can name a command that runs for as long as Anna does
+  and prints a line whenever something happens — `hey watch --events new` is
+  the one this was made for. Every line is a poke; she restarts the command
+  when it exits, reaps it, and takes it down with her. In the config:
+  `"trigger": { "command": "hey", "args": ["watch", "--events", "new"] }`.
 - One binary. katami and ax are library crates with a thin binary each
   (`cli.rs` holds their command line), and Anna depends on both by path.
   `anna memory …` and `anna claude account …` are their own subcommands

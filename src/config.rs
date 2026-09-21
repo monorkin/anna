@@ -82,6 +82,19 @@ pub struct Source {
     /// The call that answers in a conversation. `{conversation}` and
     /// `{text}` in its arguments are filled in.
     pub reply: Call,
+    /// A command that runs for as long as Anna does and prints a line
+    /// whenever something happens on this source — `hey watch --events new`,
+    /// say. Every line is a poke. With one of these the timer only has to
+    /// catch what the trigger missed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<Trigger>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Trigger {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

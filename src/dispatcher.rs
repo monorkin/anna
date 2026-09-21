@@ -13,6 +13,9 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -21,7 +24,7 @@ use std::time::Duration;
 
 use crate::claude;
 use crate::clock;
-use crate::config::Source;
+use crate::config::{Source, Trigger};
 use crate::control::{self, Controls};
 use crate::conversation::Conversation;
 use crate::judge::{MANIPULATION_QUESTION, SUSPICIOUS};
@@ -33,6 +36,7 @@ use crate::thread;
 
 const SWITCH_AT_PERCENT: f64 = 90.0;
 const SECONDS_BETWEEN_ACCOUNT_CHECKS: u64 = 60;
+const SECONDS_BEFORE_RESTARTING_A_TRIGGER: u64 = 10;
 
 #[derive(Default)]
 struct Turns {
@@ -61,6 +65,9 @@ pub fn run() -> Result<()> {
     let mut listeners = Vec::new();
     for (name, source) in runtime.config.sources.clone() {
         let (poke, poked) = mpsc::channel();
+        if let Some(trigger) = source.trigger.clone() {
+            watch_trigger(name.clone(), trigger, poke.clone());
+        }
         pokes.insert(name.clone(), poke);
 
         let runtime = runtime.clone();
@@ -179,6 +186,54 @@ fn rotate_accounts() {
     });
 }
 
+/// Runs a source's trigger for as long as Anna runs, poking the source for
+/// every line it prints. What the line says doesn't matter: she reads what
+/// happened from the source itself, so a trigger can't put words in anyone's
+/// mouth. A trigger that exits is started again after a pause — watchers lose
+/// their connection now and then, and one that can't start at all shouldn't
+/// spin.
+fn watch_trigger(source: String, trigger: Trigger, poke: Sender<()>) {
+    os_thread::spawn(move || {
+        loop {
+            logs::event("trigger.starting", json!({ "source": source, "command": trigger.command }));
+            if let Err(error) = poke_for_every_line(&trigger, &poke) {
+                logs::event("trigger.failed", json!({ "source": source, "error": format!("{error:#}") }));
+            }
+            os_thread::sleep(Duration::from_secs(SECONDS_BEFORE_RESTARTING_A_TRIGGER));
+        }
+    });
+}
+
+/// Returns when the trigger exits, having waited for it so it leaves no
+/// zombie behind.
+fn poke_for_every_line(trigger: &Trigger, poke: &Sender<()>) -> Result<()> {
+    let mut command = Command::new(&trigger.command);
+    command
+        .args(&trigger.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+
+    let mut child = command.spawn().with_context(|| format!("could not start {}", trigger.command))?;
+    let output = child.stdout.take().context("the trigger has no output")?;
+    for _line in BufReader::new(output).lines().map_while(|line| line.ok()) {
+        let _ = poke.send(());
+    }
+
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("{} exited with {status}", trigger.command)
+    }
+}
+
 /// Checks the source whenever it is poked, and on a timer for everything
 /// nobody pokes her about.
 fn listen(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Source, poked: &Receiver<()>) {
@@ -226,4 +281,30 @@ fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Sou
             let _ = conversation.say("Something broke on my side before I could finish this. I've logged it; ask me again and I'll pick it back up.");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn trigger(script: &str) -> Trigger {
+        Trigger {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), script.to_string()],
+        }
+    }
+
+    #[test]
+    fn every_line_a_trigger_prints_is_a_poke() {
+        let (poke, poked) = mpsc::channel();
+
+        poke_for_every_line(&trigger("echo '{\"event\":\"new\"}'; echo ready"), &poke).unwrap();
+        assert_eq!(poked.try_iter().count(), 2);
+
+        let error = poke_for_every_line(&trigger("echo once; exit 3"), &poke).unwrap_err();
+        assert!(error.to_string().contains("exited with"));
+        assert_eq!(poked.try_iter().count(), 1);
+
+        assert!(poke_for_every_line(&Trigger { command: "no-such-program-anywhere".to_string(), args: vec![] }, &poke).is_err());
+    }
 }
