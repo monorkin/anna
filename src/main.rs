@@ -6,6 +6,7 @@ mod clock;
 mod config;
 mod control;
 mod conversation;
+mod deadline;
 mod dispatcher;
 mod editor;
 mod fsutil;
@@ -152,11 +153,13 @@ enum McpCommand {
 fn main() {
     paths::claim_own_state();
 
-    // Rust ignores SIGPIPE, which turns `anna log | head` into a panic. Only
-    // there: everywhere else a closed pipe has to come back as an error, or
-    // an MCP server that died takes the whole of Anna with it at the next
-    // write.
-    if std::env::args().nth(1).as_deref() == Some("log") {
+    // Rust ignores SIGPIPE, which turns `anna log | head` into a panic, so
+    // the commands that print and leave get the usual behaviour back. The
+    // ones that talk to MCP servers don't: there a closed pipe has to come
+    // back as an error, or a server that died takes the whole of Anna with
+    // it at the next write.
+    let talks_to_servers = matches!(std::env::args().nth(1).as_deref(), Some("run" | "chat"));
+    if !talks_to_servers {
         unsafe {
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
         }

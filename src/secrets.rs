@@ -15,8 +15,9 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use crate::deadline;
 use crate::fsutil;
 use crate::paths;
 
@@ -69,26 +70,10 @@ fn store_in_keyring(name: &str, value: &str) -> Result<()> {
 /// there when Anna starts on her own, so the lookup is given up on and the
 /// file is tried instead.
 fn load_from_keyring(name: &str) -> Option<String> {
-    let mut child = Command::new("secret-tool")
-        .arg("lookup")
-        .args(attributes(name))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+    let mut lookup = Command::new("secret-tool");
+    lookup.arg("lookup").args(attributes(name));
 
-    let deadline = Instant::now() + Duration::from_secs(SECONDS_FOR_THE_KEYRING);
-    while child.try_wait().ok()?.is_none() {
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    let output = child.wait_with_output().ok()?;
+    let output = deadline::output_within(&mut lookup, Duration::from_secs(SECONDS_FOR_THE_KEYRING))?;
     let value = String::from_utf8(output.stdout).ok()?;
     if output.status.success() && !value.is_empty() {
         Some(value)

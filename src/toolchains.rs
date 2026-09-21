@@ -11,10 +11,16 @@
 //! folders under the installs folder are used; mise also lists places like
 //! cargo's bin folder, whose parent holds registry credentials.
 
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
+use crate::deadline;
+use crate::logs;
 use crate::paths;
+
+const SECONDS_FOR_MISE: u64 = 15;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Toolchains {
@@ -31,9 +37,16 @@ impl Toolchains {
             return Toolchains::default();
         };
 
-        match Command::new(mise).arg("bin-paths").current_dir(&home).output() {
-            Ok(output) => Toolchains::listed(&String::from_utf8_lossy(&output.stdout)),
-            Err(_) => Toolchains::default(),
+        // Hands without mise's tools still work; an Anna that never comes up
+        // because mise is busy doesn't
+        let mut bin_paths = Command::new(mise);
+        bin_paths.arg("bin-paths").current_dir(&home);
+        match deadline::output_within(&mut bin_paths, Duration::from_secs(SECONDS_FOR_MISE)) {
+            Some(output) => Toolchains::listed(&String::from_utf8_lossy(&output.stdout)),
+            None => {
+                logs::event("toolchains.not_found", json!({ "reason": "mise did not answer in time" }));
+                Toolchains::default()
+            }
         }
     }
 

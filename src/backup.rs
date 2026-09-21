@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use zip::write::SimpleFileOptions;
@@ -121,7 +121,7 @@ impl Archive {
     fn add_database(&mut self) -> Result<()> {
         let database = paths::database();
         if database.exists() {
-            let snapshot = std::env::temp_dir().join(format!("anna-snapshot-{}.db", std::process::id()));
+            let snapshot = staging("snapshot.db")?;
             Store::open_at(&database)?.snapshot_to(&snapshot)?;
             let added = self.add_file_if_there(&snapshot, "data/anna.db");
             let _ = fs::remove_file(&snapshot);
@@ -147,36 +147,47 @@ impl Archive {
     /// katami writes its own export, which restore hands back to it. A store
     /// with nothing in it has nothing to export, and that is not an error.
     fn add_memory(&mut self) -> Result<()> {
-        let exported = std::env::temp_dir().join(format!("anna-memory-{}.zip", std::process::id()));
+        let exported = staging("memory.zip")?;
         let _ = fs::remove_file(&exported);
-        if katami::transfer::export("all", Some(exported.clone())).is_ok() {
-            self.add_file_if_there(&exported, MEMORY)?;
+        match katami::transfer::export("all", Some(exported.clone())) {
+            Ok(_) => self.add_file_if_there(&exported, MEMORY)?,
+            Err(error) => eprintln!("Her memory was left out: {error:#}. That is expected when she has none yet."),
         }
         let _ = fs::remove_file(&exported);
         Ok(())
     }
 
+    /// Links are left out rather than followed: one pointing out of her
+    /// folders would pull in whatever it points at, and one pointing back up
+    /// would never end.
     fn add_tree(&mut self, directory: &Path, under: &str) -> Result<()> {
-        let Ok(entries) = fs::read_dir(directory) else {
-            return Ok(());
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error).with_context(|| format!("could not read {}", directory.display())),
         };
 
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.with_context(|| format!("could not read {}", directory.display()))?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            let path = entry.path();
-            if path.is_dir() {
-                self.add_tree(&path, &format!("{under}/{name}"))?;
-            } else {
-                self.add_file_if_there(&path, &format!("{under}/{name}"))?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                self.add_tree(&entry.path(), &format!("{under}/{name}"))?;
+            } else if kind.is_file() {
+                self.add_file_if_there(&entry.path(), &format!("{under}/{name}"))?;
             }
         }
         Ok(())
     }
 
+    /// A file that isn't there is left out. One that is there and can't be
+    /// read fails the backup: a zip that looks whole and isn't is worse than
+    /// none.
     fn add_file_if_there(&mut self, path: &Path, name: &str) -> Result<()> {
         match fs::read(path) {
             Ok(contents) => self.add(name, &contents),
-            Err(_) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("could not read {}", path.display())),
         }
     }
 
@@ -205,9 +216,20 @@ pub fn restore(path: &Path, force: bool) -> Result<()> {
         bail!("that backup is in a format this Anna doesn't know");
     }
 
+    // Everything is looked at before anything is written, so a backup that
+    // is going to be refused is refused while the Anna here is still whole
+    let names: Vec<String> = (0..zip.len()).map(|index| Ok(zip.by_index(index)?.name().to_string())).collect::<Result<_>>()?;
+    for name in &names {
+        if let Some(destination) = destination_of(name)? {
+            refuse_links_on_the_way_to(&destination)?;
+        }
+    }
+    if force {
+        make_room_for_the_backup()?;
+    }
+
     let mut restored = 0;
-    for index in 0..zip.len() {
-        let name = zip.by_index(index)?.name().to_string();
+    for name in names {
         let contents = contents_of(&mut zip, &name)?;
 
         if name == SECRETS {
@@ -219,7 +241,7 @@ pub fn restore(path: &Path, force: bool) -> Result<()> {
             restore_memory(&contents)?;
             restored += 1;
         } else if let Some(destination) = destination_of(&name)? {
-            put(&destination, &contents, name.starts_with("config/"))?;
+            put(&destination, &contents)?;
             restored += 1;
         }
     }
@@ -256,27 +278,73 @@ fn destination_of(name: &str) -> Result<Option<PathBuf>> {
     Ok(destination)
 }
 
-fn put(destination: &Path, contents: &[u8], steers_anna: bool) -> Result<()> {
-    if steers_anna {
-        fsutil::write_private_bytes(destination, contents)
-    } else {
-        if let Some(directory) = destination.parent() {
-            fs::create_dir_all(directory)?;
+/// The names in a backup are checked, but a name is only where a write
+/// starts: a link already sitting in her folders would carry it somewhere
+/// else. Nothing she makes herself is a link, so one on the way is refused.
+fn refuse_links_on_the_way_to(destination: &Path) -> Result<()> {
+    for place in destination.ancestors().take_while(|it| !is_a_root_of_hers(it)) {
+        if fs::symlink_metadata(place).is_ok_and(|it| it.file_type().is_symlink()) {
+            bail!("{} is a link, and restoring would write through it; remove it first", place.display());
         }
-        fs::write(destination, contents)?;
-        Ok(())
     }
+    Ok(())
+}
+
+fn is_a_root_of_hers(place: &Path) -> bool {
+    place == paths::config_dir() || place == paths::data_dir() || place == paths::claude_config_home()
+}
+
+/// `--force` replaces the Anna that is here, so what the backup may not
+/// hold must not be left over from her: the old personality, threads the
+/// backup never had, what her sources had already seen. An old write-ahead
+/// log would be replayed over the restored database.
+fn make_room_for_the_backup() -> Result<()> {
+    for name in CONFIG_FILES {
+        remove_if_there(&paths::config_dir().join(name))?;
+    }
+    for sidecar in ["anna.db", "anna.db-wal", "anna.db-shm"] {
+        remove_if_there(&paths::data_dir().join(sidecar))?;
+    }
+    for folder in ["threads", "sources"] {
+        match fs::remove_dir_all(paths::data_dir().join(folder)) {
+            Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn remove_if_there(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != ErrorKind::NotFound => Err(error).with_context(|| format!("could not remove {}", path.display())),
+        _ => Ok(()),
+    }
+}
+
+/// Everything she keeps is hers alone, restored as it was written.
+fn put(destination: &Path, contents: &[u8]) -> Result<()> {
+    fsutil::write_private_bytes(destination, contents)
 }
 
 /// Memories that are already here win over the backup's: they are the newer
 /// ones, and katami's store is shared with every other session on the
 /// machine.
 fn restore_memory(exported: &[u8]) -> Result<()> {
-    let path = std::env::temp_dir().join(format!("anna-memory-{}.zip", std::process::id()));
-    fs::write(&path, exported)?;
+    let path = staging("memory.zip")?;
+    fsutil::write_private_bytes(&path, exported)?;
     let imported = katami::transfer::import(&path, katami::transfer::OnCollision::Skip, &paths::claude_config_home());
     let _ = fs::remove_file(&path);
     imported
+}
+
+/// Where a file waits on its way into or out of a zip: her runtime folder,
+/// which only she can look into. The system's temp folder is everyone's,
+/// and a database or her memory would sit there readable under a name
+/// anyone could guess.
+fn staging(name: &str) -> Result<PathBuf> {
+    let directory = paths::runtime_dir().join("staging");
+    paths::make_private_dir(&directory)?;
+    Ok(directory.join(format!("{}-{name}", std::process::id())))
 }
 
 /// Claude Code keeps a folder's transcripts under the folder's absolute path

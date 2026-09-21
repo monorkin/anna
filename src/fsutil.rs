@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::fs;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
 use crate::clock;
@@ -74,6 +74,7 @@ fn refuse_if(path: &Path, forbidden: u32, problem: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn private_files_are_written_private_and_refused_when_they_are_not() {
