@@ -10,7 +10,7 @@
 //! `user_version`. Every thread and the scheduler open their own connection;
 //! WAL and a busy timeout let them write side by side.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
@@ -113,13 +113,30 @@ impl Store {
         Ok(())
     }
 
+    /// The version is read inside the transaction that acts on it, and the
+    /// transaction takes the write lock up front: two processes opening a
+    /// new database at once would otherwise both see version 0, and the
+    /// second would fail on tables the first had just made. A database from
+    /// a newer Anna is refused rather than written to with an old idea of
+    /// what is in it.
     fn migrate(&self) -> Result<()> {
+        self.connection.execute_batch("BEGIN IMMEDIATE")?;
+        let migrated = self.migrate_from_where_it_is();
+        if migrated.is_ok() {
+            self.connection.execute_batch("COMMIT")?;
+        } else {
+            let _ = self.connection.execute_batch("ROLLBACK");
+        }
+        migrated
+    }
+
+    fn migrate_from_where_it_is(&self) -> Result<()> {
         let version: usize = self.connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > MIGRATIONS.len() {
+            bail!("the database is from a newer Anna (version {version}, and this one knows {}); update her before starting", MIGRATIONS.len());
+        }
         for (index, migration) in MIGRATIONS.iter().enumerate().skip(version) {
-            self.connection.execute_batch(&format!(
-                "BEGIN; {migration} PRAGMA user_version = {}; COMMIT;",
-                index + 1
-            ))?;
+            self.connection.execute_batch(&format!("{migration} PRAGMA user_version = {};", index + 1))?;
         }
         Ok(())
     }

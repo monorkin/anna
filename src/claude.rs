@@ -10,7 +10,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -19,6 +18,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use crate::fsutil;
 use crate::paths;
 
 #[derive(Debug, Deserialize)]
@@ -204,7 +204,6 @@ pub fn write_hand_profile(profile: &Path) -> Result<()> {
     let credentials: Value = read_json(&home.join(".credentials.json"))?;
     let identity: Value = read_json(&home.join(".claude.json"))?;
 
-    fs::create_dir_all(profile)?;
     write_private(&profile.join(".credentials.json"), &access_only(&credentials)?)?;
     write_private(
         &profile.join(".claude.json"),
@@ -230,10 +229,10 @@ fn read_json(path: &Path) -> Result<Value> {
     serde_json::from_str(&text).with_context(|| format!("{} is not JSON", path.display()))
 }
 
+/// Private from the first byte, in a folder that is: it holds a Claude
+/// login, and written and then closed off it could be read in between.
 fn write_private(path: &Path, value: &Value) -> Result<()> {
-    fs::write(path, value.to_string())?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+    fsutil::write_private(path, &value.to_string())
 }
 
 #[cfg(test)]

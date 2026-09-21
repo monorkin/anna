@@ -3,7 +3,7 @@
 //! into the conversation a message came from.
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 use crate::config::{Call, Pointers, Source};
 use crate::conversation::{Conversation, Origin};
+use crate::fsutil;
+use crate::logs;
 use crate::mcp::Catalog;
 use crate::paths;
 
@@ -85,19 +87,33 @@ impl Seen {
         self.ids.insert(id.to_string()) && !self.first_look
     }
 
+    /// For a message that couldn't be acted on yet: it is new again at the
+    /// next look.
+    pub fn forget(&mut self, id: &str) {
+        self.ids.remove(id);
+    }
+
+    /// Written whole and then moved into place: a crash half-way through
+    /// would otherwise leave a file that reads as a first look, and the
+    /// next look would pass over everything new as backlog.
     pub fn save(&mut self) -> Result<()> {
         self.first_look = false;
         if let Some(directory) = self.path.parent() {
             fs::create_dir_all(directory)?;
         }
-        fs::write(&self.path, serde_json::to_string(&self.ids)?)?;
-        Ok(())
+        fsutil::write_private(&self.path, &serde_json::to_string(&self.ids)?)
     }
 
     fn load_from(path: PathBuf) -> Seen {
-        match fs::read_to_string(&path).ok().and_then(|it| serde_json::from_str(&it).ok()) {
-            Some(ids) => Seen { path, ids, first_look: false },
-            None => Seen { path, ids: BTreeSet::new(), first_look: true },
+        match fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(ids) => Seen { path, ids, first_look: false },
+                Err(error) => {
+                    logs::event("source.seen_unreadable", json!({ "file": path, "error": error.to_string() }));
+                    Seen { path, ids: BTreeSet::new(), first_look: true }
+                }
+            },
+            Err(_) => Seen { path, ids: BTreeSet::new(), first_look: true },
         }
     }
 }
@@ -318,6 +334,9 @@ mod tests {
         assert!(!reloaded.is_new("old-1"));
         assert!(!reloaded.is_new("new-1"));
         assert!(reloaded.is_new("new-2"));
+
+        reloaded.forget("new-2");
+        assert!(reloaded.is_new("new-2"), "a message that couldn't be acted on yet is new again at the next look");
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

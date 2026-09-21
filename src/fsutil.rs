@@ -11,6 +11,8 @@ use std::fs;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
+use crate::clock;
+
 const OTHERS_CAN_WRITE: u32 = 0o022;
 const OTHERS_CAN_DO_ANYTHING: u32 = 0o077;
 
@@ -24,17 +26,21 @@ pub fn write_private_bytes(path: &Path, contents: &[u8]) -> Result<()> {
     let directory = path.parent().context("the file has no folder")?;
     fs::DirBuilder::new().recursive(true).mode(0o700).create(directory)?;
 
-    let temporary = path.with_extension("writing");
+    // A name of its own, made new: two writers don't share a half-written
+    // file, and one that was put there for it to follow is refused
+    let name = path.file_name().context("the file has no name")?.to_string_lossy();
+    let temporary = directory.join(format!(".{name}.{}.{:x}.writing", std::process::id(), clock::nanos()));
     let mut file = fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(&temporary)?;
-    std::io::Write::write_all(&mut file, contents)?;
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
-    fs::rename(&temporary, path)?;
-    Ok(())
+
+    let written = std::io::Write::write_all(&mut file, contents).and_then(|_| fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    Ok(written?)
 }
 
 /// For files that hold tokens: nobody else may even read them.

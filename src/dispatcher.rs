@@ -252,16 +252,28 @@ fn check(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Source
 
     for message in source::messages_in(source, &answer)? {
         if seen.is_new(&message.id) {
-            dispatch(runtime, turns, name, source, message);
+            let id = message.id.clone();
+            if dispatch(runtime, turns, name, source, message) == Dispatched::NotYet {
+                seen.forget(&id);
+            }
         }
     }
     seen.save()
 }
 
-fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Source, message: Message) {
+#[derive(PartialEq)]
+enum Dispatched {
+    Done,
+    /// The message couldn't be checked, so it wasn't read. It stays new and
+    /// is tried again at the next look, rather than lost to an outage that
+    /// its sender never hears about.
+    NotYet,
+}
+
+fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Source, message: Message) -> Dispatched {
     let Some((person, standing)) = heard_as(&runtime.config.people, source, &message) else {
         logs::event("message.ignored", json!({ "source": name, "sender": message.sender }));
-        return;
+        return Dispatched::Done;
     };
     let conversation: Arc<dyn Conversation> =
         Arc::new(Sourced::new(name, source, &message.conversation, runtime.catalog.clone()));
@@ -270,12 +282,11 @@ fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Sou
         Screening::Suspicious => {
             logs::event("message.refused", json!({ "source": name, "sender": message.sender, "message": message.id }));
             let _ = conversation.say("That read like instructions aimed at an AI rather than something from you, so I didn't act on it. If it was you, say it again in your own words.");
-            return;
+            return Dispatched::Done;
         }
         Screening::Unchecked => {
             logs::event("message.unchecked", json!({ "source": name, "sender": message.sender, "message": message.id }));
-            let _ = conversation.say("I couldn't check that message before reading it — the checker isn't answering right now — so I haven't acted on it. Send it again in a bit.");
-            return;
+            return Dispatched::NotYet;
         }
     }
 
@@ -284,6 +295,7 @@ fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Sou
         Standing::CanAssignWork => format!("{person}, who can give you work but isn't someone you take direction from, says on {name}:\n\n{}", message.text),
     };
     wake_in_turn(runtime, turns, conversation, standing, said);
+    Dispatched::Done
 }
 
 /// Who a message is heard as and on what standing, or nobody. Someone in
