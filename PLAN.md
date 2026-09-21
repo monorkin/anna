@@ -152,7 +152,8 @@ source:
   runs, refuses to replace an existing Anna without `--force`, and refuses
   entries that try to leave their folder.
 - One binary. katami and ax are library crates with a thin binary each
-  (`cli.rs` holds their command line), and Anna depends on both by path.
+  (`cli.rs` holds their command line), and Anna depends on both from git;
+  `Cargo.lock` pins the commits.
   `anna memory …` and `anna claude account …` are their own subcommands
   mounted as they are. katami re-runs its executable as `hook`, `review` and
   `curate`; inside Anna that executable is Anna, and she hands those three
@@ -413,10 +414,10 @@ poller and dispatcher, setup.
 
 Next:
 
-1. Commit and release the katami and ax changes, then point Anna at them as
-   git dependencies instead of sibling folders.
-2. Anna's own accounts on Basecamp and HEY; configure them as sources and see
-   what their watch tools really answer with.
+1. Release katami and ax, and Anna herself, so there is an install line for
+   the README.
+2. A basecamp CLI with the agent login (it is on its `main`, unreleased), then
+   Anna as an agent in a real Basecamp account, end to end.
 3. The config as a ceiling: who may ask for what, the widest grant, a per-task
    budget.
 4. Registries through the proxy, per hand; Rust inside the sandbox.

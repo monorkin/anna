@@ -6,9 +6,9 @@ license = "MIT"
 
 [dependencies]
 # Anna is built on these two: katami is her memory, ax her Claude accounts.
-# They're sibling checkouts until they're published somewhere cargo can fetch.
-katami = { path = "../katami" }
-ax = { path = "../ax" }
+# Cargo.lock pins the commit; `cargo update -p katami -p ax` moves to newer ones.
+katami = { git = "https://github.com/monorkin/katami.git" }
+ax = { git = "https://github.com/monorkin/ax.git" }
 anyhow = "1.0.104"
 chrono = "0.4.45"
 croner = "4.0.0"
