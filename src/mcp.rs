@@ -197,6 +197,11 @@ struct Offered {
     description: String,
     input_schema: Value,
     prose_arguments: Vec<String>,
+    /// What the server says about the tool, in MCP's own words
+    /// (`readOnlyHint`). A server that says nothing has said it may write:
+    /// a server added today has no prose marked yet, and without this every
+    /// one of its tools — posting ones too — could be handed to a hand.
+    only_reads: bool,
     server: Arc<Mutex<Server>>,
     editor: Arc<Editor>,
     judge: Arc<Judge>,
@@ -219,6 +224,7 @@ impl Catalog {
                             description: tool["description"].as_str().unwrap_or_default().to_string(),
                             input_schema: tool["inputSchema"].clone(),
                             prose_arguments: settings.prose.get(&remote_name).cloned().unwrap_or_default(),
+                            only_reads: tool["annotations"]["readOnlyHint"].as_bool().unwrap_or(false),
                             remote_name,
                             server: server.clone(),
                             editor: editor.clone(),
@@ -264,10 +270,12 @@ impl Catalog {
             .find(|it| it.name == name)
             .with_context(|| format!("there is no tool called {name} to grant"))?;
 
-        if tool.prose_arguments.is_empty() {
-            Ok(Box::new(tool.clone()))
-        } else {
+        if !tool.prose_arguments.is_empty() {
             bail!("{name} speaks to people, and hands don't. Have the hand report to you and say it yourself.")
+        } else if !tool.only_reads {
+            bail!("{name} can change things out there, and its server doesn't say otherwise, so a hand can't have it. Have the hand report to you and use {name} yourself.")
+        } else {
+            Ok(Box::new(tool.clone()))
         }
     }
 }
@@ -436,6 +444,7 @@ done
                 description: String::new(),
                 input_schema: json!({}),
                 prose_arguments: Vec::new(),
+                only_reads: remote_name == "shout",
                 server: Arc::new(Mutex::new(Server::start(&fake_server()).unwrap())),
                 editor: Arc::new(Editor::new(None, judge.clone())),
                 judge: judge.clone(),
@@ -450,6 +459,39 @@ done
         let withheld_error = Tool::call(&offered("whisper"), &json!({})).unwrap_err().to_string();
         assert!(withheld_error.starts_with("This call failed, and what the server said about it was withheld"));
         assert!(!withheld_error.contains("no such tool"));
+    }
+
+    #[test]
+    fn a_hand_is_only_granted_what_its_server_says_only_reads() {
+        let judge = Arc::new(Judge::Haiku);
+        let server = Arc::new(Mutex::new(Server::start(&fake_server()).unwrap()));
+        let offered = |name: &str, only_reads: bool, prose_arguments: Vec<String>| {
+            Arc::new(Offered {
+                name: name.to_string(),
+                remote_name: name.to_string(),
+                description: String::new(),
+                input_schema: json!({}),
+                prose_arguments,
+                only_reads,
+                server: server.clone(),
+                editor: Arc::new(Editor::new(None, judge.clone())),
+                judge: judge.clone(),
+            })
+        };
+        let catalog = Catalog {
+            tools: vec![
+                offered("mail_search", true, Vec::new()),
+                offered("mail_threads", false, Vec::new()),
+                offered("mail_digest", true, vec!["body".to_string()]),
+            ],
+            servers: BTreeMap::new(),
+        };
+
+        assert_eq!(catalog.grant(&["mail_search".to_string()]).unwrap().len(), 1);
+        let writes = catalog.grant(&["mail_threads".to_string()]).err().unwrap().to_string();
+        assert!(writes.contains("can change things out there"), "a server added today has no prose marked, and still can't post through a hand");
+        assert!(catalog.grant(&["mail_digest".to_string()]).err().unwrap().to_string().contains("speaks to people"));
+        assert_eq!(catalog.all().len(), 3, "the thread itself still gets everything");
     }
 
     #[test]

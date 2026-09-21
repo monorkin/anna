@@ -104,7 +104,7 @@ impl Tool for StartHand {
                 "tools": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Names of your own tools this hand may also call. Leave it out unless the work needs them.",
+                    "description": "Names of your own tools this hand may also call. Only tools that look things up can be given to a hand; anything that posts or changes something out there stays with you. Leave it out unless the work needs them.",
                 },
             },
             "required": ["project", "brief"],
