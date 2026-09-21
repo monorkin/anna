@@ -10,7 +10,7 @@ She uses your regular Claude Code subscription, runs everything in
 sandboxes, can auto-switch between multiple Claude subscriptions,
 and learns and improves over time while also being token efficient.
 
-> ![WARNING]
+> [!WARNING]
 > Anna is experimental. This is just an idea I'm playing around with.
 > Consider all of this a giant Rube Goldberg machine that's actively
 > being tweaked.
