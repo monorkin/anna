@@ -15,9 +15,12 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::fsutil;
 use crate::paths;
+
+const SECONDS_FOR_THE_KEYRING: u64 = 10;
 
 #[derive(Debug, PartialEq)]
 pub enum Kept {
@@ -62,13 +65,30 @@ fn store_in_keyring(name: &str, value: &str) -> Result<()> {
     }
 }
 
+/// A locked keyring asks someone to unlock it and waits for them. Nobody is
+/// there when Anna starts on her own, so the lookup is given up on and the
+/// file is tried instead.
 fn load_from_keyring(name: &str) -> Option<String> {
-    let output = Command::new("secret-tool")
+    let mut child = Command::new("secret-tool")
         .arg("lookup")
         .args(attributes(name))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
+
+    let deadline = Instant::now() + Duration::from_secs(SECONDS_FOR_THE_KEYRING);
+    while child.try_wait().ok()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let output = child.wait_with_output().ok()?;
     let value = String::from_utf8(output.stdout).ok()?;
     if output.status.success() && !value.is_empty() {
         Some(value)

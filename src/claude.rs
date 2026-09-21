@@ -60,20 +60,9 @@ pub fn reply_of(command: &mut Command, limit: Duration) -> Result<Reply> {
         .spawn()
         .context("could not run claude")?;
 
-    let ran_out = Arc::new(AtomicBool::new(false));
-    let (finished, watchdog) = mpsc::channel::<()>();
-    let process = child.id() as libc::pid_t;
-    let flag = ran_out.clone();
-    thread::spawn(move || {
-        if watchdog.recv_timeout(limit).is_err() {
-            flag.store(true, Ordering::Relaxed);
-            stop_with_everything_it_started(process);
-        }
-    });
-
+    let watch = Watch::over(child.id(), limit);
     let output = child.wait_with_output().context("could not wait for claude")?;
-    let _ = finished.send(());
-    if ran_out.load(Ordering::Relaxed) {
+    if watch.ran_out() {
         return Err(OutOfTime { minutes: limit.as_secs() / 60 }.into());
     }
 
@@ -89,6 +78,35 @@ pub fn reply_of(command: &mut Command, limit: Duration) -> Result<Reply> {
         bail!("claude reported an error: {}", reply.result);
     }
     Ok(reply)
+}
+
+/// Stops a process, and everything it started, if it is still going when its
+/// time is up.
+struct Watch {
+    finished: mpsc::Sender<()>,
+    ran_out: Arc<AtomicBool>,
+}
+
+impl Watch {
+    fn over(process: u32, limit: Duration) -> Watch {
+        let ran_out = Arc::new(AtomicBool::new(false));
+        let (finished, watchdog) = mpsc::channel::<()>();
+        let flag = ran_out.clone();
+        thread::spawn(move || {
+            if let Err(mpsc::RecvTimeoutError::Timeout) = watchdog.recv_timeout(limit) {
+                flag.store(true, Ordering::Relaxed);
+                stop_with_everything_it_started(process as libc::pid_t);
+            }
+        });
+        Watch { finished, ran_out }
+    }
+
+    /// Asked once the process has been waited for, which also calls the
+    /// watch off.
+    fn ran_out(self) -> bool {
+        let _ = self.finished.send(());
+        self.ran_out.load(Ordering::Relaxed)
+    }
 }
 
 /// Claude Code runs shell commands in sessions of their own, so neither the
@@ -150,6 +168,10 @@ fn parent_in(stat: &str) -> Option<libc::pid_t> {
     after_name.split_whitespace().nth(1)?.parse().ok()
 }
 
+/// Judging and editing sit in front of every message in and out, outside the
+/// time a run is given, so they get a limit of their own.
+const SECONDS_FOR_HAIKU: u64 = 180;
+
 /// One question to haiku about a text, with the text on stdin where it reads
 /// as data. No tools beyond Read, no MCP, run from a temp folder.
 pub fn ask_haiku(prompt: &str, text: &str) -> Result<String> {
@@ -163,9 +185,13 @@ pub fn ask_haiku(prompt: &str, text: &str) -> Result<String> {
         .stderr(Stdio::null())
         .spawn()
         .context("could not run claude")?;
+    let watch = Watch::over(child.id(), Duration::from_secs(SECONDS_FOR_HAIKU));
     child.stdin.take().context("claude has no stdin")?.write_all(text.as_bytes())?;
 
     let output = child.wait_with_output()?;
+    if watch.ran_out() {
+        bail!("haiku did not answer within {SECONDS_FOR_HAIKU} seconds");
+    }
     let reply: Reply = serde_json::from_slice(&output.stdout).context("haiku gave no readable reply")?;
     if reply.is_error {
         bail!("haiku reported an error: {}", reply.result);

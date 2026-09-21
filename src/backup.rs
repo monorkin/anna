@@ -55,7 +55,7 @@ pub fn backup(to: Option<PathBuf>, without_secrets: bool) -> Result<()> {
     archive.add_config()?;
     if !without_secrets {
         archive.add_secrets()?;
-        archive.add_accounts()?;
+        archive.add_logins()?;
     }
     archive.add_database()?;
     archive.add_data_files()?;
@@ -87,21 +87,22 @@ struct Archive {
 }
 
 impl Archive {
-    /// Her own files, and the config of the tools she has a profile of her
-    /// own in. Their credentials are usually in the keyring, which nothing
-    /// can export, so after a restore on another machine those tools need
-    /// logging in again.
     fn add_config(&mut self) -> Result<()> {
         for name in CONFIG_FILES {
             self.add_file_if_there(&paths::config_dir().join(name), &format!("config/{name}"))?;
         }
-        self.add_tree(&paths::tools_config_home(), "config/tools")
+        Ok(())
     }
 
-    /// The Claude accounts she rotates between. They are logins, so they go
-    /// wherever her tokens go and stay out when those do.
-    fn add_accounts(&mut self) -> Result<()> {
-        self.add_tree(&paths::accounts_dir(), "config/ax")
+    /// The Claude accounts she rotates between, and the config of the tools
+    /// she has a profile of her own in. Both are logins — a tool without a
+    /// keyring keeps its credentials right there in a file — so they go
+    /// wherever her tokens go and stay out when those do. What a tool did
+    /// put in the keyring can't be exported, so after a restore on another
+    /// machine it needs logging in again.
+    fn add_logins(&mut self) -> Result<()> {
+        self.add_tree(&paths::accounts_dir(), "config/ax")?;
+        self.add_tree(&paths::tools_config_home(), "config/tools")
     }
 
     /// From wherever each one lives — keyring or file — so restoring doesn't

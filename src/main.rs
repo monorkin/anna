@@ -67,7 +67,7 @@ enum Command {
         /// Where to write the zip; defaults to anna-backup-<time>.zip here
         #[usage(long)]
         to: Option<std::path::PathBuf>,
-        /// Leave her tokens out of the zip
+        /// Leave her tokens and logins out of the zip: Jev's key, the Claude accounts, her tools' own config
         #[usage(long)]
         without_secrets: bool,
     },
