@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use crate::deadline;
 use crate::toolchains::Toolchains;
 
 const INSIDE: &str = r#"
@@ -33,6 +34,36 @@ pub struct Outside {
     pub proxy_socket: PathBuf,
     pub toolchains: Toolchains,
     pub time_limit: Duration,
+    /// Whether the user's systemd can be asked for a scope. With one, a
+    /// session gets a ceiling on memory and on how many processes it may
+    /// have, so a hand that forks without end or eats all the memory takes
+    /// itself down and not the machine Anna runs on.
+    pub scopes: bool,
+}
+
+const MOST_MEMORY: &str = "MemoryMax=8G";
+const MOST_PROCESSES: &str = "TasksMax=2048";
+const SECONDS_TO_FIND_OUT: u64 = 10;
+
+impl Outside {
+    /// Asked with the very limits a session will get, so a systemd that
+    /// gives scopes but can't set these is found out here and not by the
+    /// first hand.
+    pub fn can_have_scopes() -> bool {
+        let mut trial = scope();
+        trial.arg("/usr/bin/true");
+        deadline::output_within(&mut trial, Duration::from_secs(SECONDS_TO_FIND_OUT)).is_some_and(|it| it.status.success())
+    }
+}
+
+/// `systemd-run`, up to where the program to run goes.
+fn scope() -> Command {
+    let mut command = Command::new("systemd-run");
+    command
+        .args(["--user", "--scope", "--quiet", "--collect"])
+        .args(["-p", MOST_MEMORY, "-p", "MemorySwapMax=0", "-p", MOST_PROCESSES])
+        .arg("--");
+    command
 }
 
 pub struct Sandbox<'outside> {
@@ -47,7 +78,7 @@ impl Sandbox<'_> {
     /// `claude` inside the sandbox; whatever arguments the caller adds go to
     /// claude.
     pub fn claude(&self, claude_binary: &Path) -> Command {
-        let mut command = Command::new("bwrap");
+        let mut command = self.contained();
         command
             // Nothing of Anna's environment goes in: whatever tokens she was
             // started with are hers, and what a session needs is set below
@@ -91,6 +122,19 @@ impl Sandbox<'_> {
             .args(["--setenv", "HTTPS_PROXY", "http://127.0.0.1:3128"])
             .args(["/usr/bin/bash", "-c", INSIDE, "sandbox"]);
         command
+    }
+
+    /// bwrap, inside a scope of its own when there can be one. A scope runs
+    /// the program in place of systemd-run, so the process Anna started is
+    /// still the one she watches and stops.
+    fn contained(&self) -> Command {
+        if self.outside.scopes {
+            let mut command = scope();
+            command.arg("bwrap");
+            command
+        } else {
+            Command::new("bwrap")
+        }
     }
 
     fn bind_project(&self, command: &mut Command) {
@@ -165,6 +209,7 @@ mod tests {
             proxy_socket: PathBuf::from("/run/anna/proxy.sock"),
             toolchains: Toolchains::default(),
             time_limit: Duration::from_secs(60),
+            scopes: false,
         };
         let arguments = arguments_of(&Sandbox {
             project: project.clone(),
@@ -207,7 +252,12 @@ mod tests {
         fs::write(worktree.join(".git"), "gitdir: /somewhere/real\n").unwrap();
         fs::write(root.join("proxy.sock"), "").unwrap();
 
-        let outside = Outside { proxy_socket: root.join("proxy.sock"), toolchains: Toolchains::default(), time_limit: Duration::from_secs(60) };
+        let outside = Outside {
+            proxy_socket: root.join("proxy.sock"),
+            toolchains: Toolchains::default(),
+            time_limit: Duration::from_secs(60),
+            scopes: Outside::can_have_scopes(),
+        };
         let run = |project: &Path, script: &str| {
             let sandbox = Sandbox { project: project.to_path_buf(), profile: root.join("profile"), outside: &outside, broker_socket: None, writable: true };
             let output = sandbox.claude(Path::new("/usr/bin/bash")).args(["-c", script]).env("ANNA_TEST_SECRET", "s3cret").output().unwrap();
@@ -237,6 +287,7 @@ mod tests {
                 bins: vec![installs.join("ruby/3.4.7/bin")],
             },
             time_limit: Duration::from_secs(60),
+            scopes: true,
         };
         let arguments = arguments_of(&Sandbox {
             project: PathBuf::from("/home/someone/project"),
@@ -245,6 +296,11 @@ mod tests {
             broker_socket: Some(PathBuf::from("/run/anna/hand-h1.sock")),
             writable: false,
         });
+
+        let bwrap = arguments.iter().position(|it| it == "bwrap").expect("with a scope to be had, bwrap runs inside one");
+        assert!(arguments[..bwrap].contains(&"--scope".to_string()));
+        assert!(arguments[..bwrap].iter().any(|it| it.starts_with("MemoryMax=")));
+        assert!(arguments[..bwrap].iter().any(|it| it.starts_with("TasksMax=")));
 
         assert_eq!(binds(&arguments, "--bind"), [("/data/reviews/r1/profile", "/profile")]);
         assert!(binds(&arguments, "--ro-bind").contains(&(installs.to_str().unwrap(), installs.to_str().unwrap())));
