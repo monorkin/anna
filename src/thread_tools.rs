@@ -92,7 +92,7 @@ impl Tool for StartHand {
     }
 
     fn description(&self) -> &str {
-        "Start a sandboxed worker in one project folder and give it a brief. It can read and write that folder and nothing else, has no network and none of your memory, so the brief must carry everything it needs to know. When it finishes, a reviewer checks the work against your brief, and you get the hand's id and the reviewer's verdict. Then send_back or dismiss."
+        "Start a sandboxed worker in one project folder and give it a brief. It can read and write that folder and nothing else, has no network and none of your memory, so the brief must carry everything it needs to know. It has the languages installed here and builds offline from what is already fetched, so fetch the project's dependencies yourself first (cargo fetch, bundle install, npm ci) when the work needs a build. Its builds go to a folder of their own, not the project's. When it finishes, a reviewer checks the work against your brief, and you get the hand's id and the reviewer's verdict. Then send_back or dismiss."
     }
 
     fn input_schema(&self) -> Value {
@@ -106,6 +106,11 @@ impl Tool for StartHand {
                     "items": { "type": "string" },
                     "description": "Names of your own tools this hand may also call. Only tools that look things up can be given to a hand; anything that posts or changes something out there stays with you. Leave it out unless the work needs them.",
                 },
+                "services": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "description": "Ports on this machine's localhost the hand may reach, as the same port on its own localhost: a database its tests need, say. Only localhost; a hand has no network. Make sure what the hand will use there — a test database, say — is set up and won't collide with anyone else's before you start it.",
+                },
             },
             "required": ["project", "brief"],
         })
@@ -117,10 +122,21 @@ impl Tool for StartHand {
             .map(|names| names.iter().filter_map(|it| it.as_str().map(String::from)).collect())
             .unwrap_or_default();
         let grant = self.catalog.grant(&names)?;
+        let ports = ports_in(&arguments["services"])?;
 
-        let hand = Hand::start(Path::new(text_of(arguments, "project")?), grant)?;
+        let hand = Hand::start(Path::new(text_of(arguments, "project")?), grant, &ports)?;
         self.workshop.round(hand, text_of(arguments, "brief")?)
     }
+}
+
+fn ports_in(services: &Value) -> Result<Vec<u16>> {
+    services
+        .as_array()
+        .map(|it| it.iter())
+        .into_iter()
+        .flatten()
+        .map(|it| u16::try_from(it.as_u64().context("a service is a port number")?).context("that is not a port number"))
+        .collect()
 }
 
 pub struct SendBack {
@@ -189,7 +205,7 @@ impl Workshop {
         let started = &self.hands.started;
         let outcome = hand
             .work(ask, &self.outside, started)
-            .and_then(|report| reviewer::review(&id, hand.project(), &hand.asked(), &report, &self.outside, started));
+            .and_then(|report| reviewer::review(&hand, &hand.asked(), &report, &self.outside, started));
 
         match outcome {
             Ok(_) if started.is_over() => {

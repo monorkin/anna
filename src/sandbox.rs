@@ -17,15 +17,37 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::deadline;
+use crate::paths;
 use crate::toolchains::Toolchains;
 
-const INSIDE: &str = r#"
-socat TCP-LISTEN:3128,fork,bind=127.0.0.1 UNIX-CONNECT:/run/proxy.sock &
-sleep 0.3
-exec /opt/claude "$@"
-"#;
+/// The shell that runs inside: socat turns the proxy's socket into the
+/// localhost proxy Claude Code is pointed at, does the same for every
+/// service the session was granted, and hands over to claude.
+fn inside(services: &[Service]) -> String {
+    let mut script = String::from("\nsocat TCP-LISTEN:3128,fork,bind=127.0.0.1 UNIX-CONNECT:/run/proxy.sock &\n");
+    for (n, service) in services.iter().enumerate() {
+        script.push_str(&format!("socat TCP-LISTEN:{},fork,bind=127.0.0.1 UNIX-CONNECT:/run/service-{n}.sock &\n", service.port));
+    }
+    script.push_str("sleep 0.3\nexec /opt/claude \"$@\"\n");
+    script
+}
 
 pub const BROKER_INSIDE: &str = "/run/broker.sock";
+/// Where a session builds. Never the project's own target folder: that is
+/// often a link into a cache the sandbox can't see, and what a hand builds
+/// shouldn't land where the person's own builds are picked up from.
+const BUILD_INSIDE: &str = "/build";
+const CARGO_INSIDE: &str = "/home/hand/.cargo";
+
+/// A port on the host's loopback that a session may reach as the same port
+/// on its own: a database for the tests, say. On the host, socat listens on
+/// `socket` and connects to the port; inside, the socket is bound in and
+/// socat listens on the port. The bridge dies with the session.
+#[derive(Debug, Clone)]
+pub struct Service {
+    pub port: u16,
+    pub socket: PathBuf,
+}
 const GIT_PARTS_THAT_RUN_CODE: [&str; 3] = [".git/config", ".git/hooks", ".git/modules"];
 
 /// What every sandbox of this process is given from outside: the way to
@@ -56,6 +78,19 @@ impl Outside {
     }
 }
 
+/// Where a project's builds are kept between sessions: under her data, by a
+/// hash of the project's path, made on the way in.
+pub fn build_dir_of(project: &Path) -> std::io::Result<PathBuf> {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in project.to_string_lossy().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let directory = paths::data_dir().join("builds").join(format!("{hash:016x}"));
+    paths::make_private_dir(&directory)?;
+    Ok(directory)
+}
+
 /// `systemd-run`, up to where the program to run goes.
 fn scope() -> Command {
     let mut command = Command::new("systemd-run");
@@ -72,6 +107,10 @@ pub struct Sandbox<'outside> {
     pub outside: &'outside Outside,
     pub broker_socket: Option<PathBuf>,
     pub writable: bool,
+    /// Where builds of this project go, on the host: kept between hands so
+    /// the second one doesn't compile the world again.
+    pub build_dir: PathBuf,
+    pub services: Vec<Service>,
 }
 
 impl Sandbox<'_> {
@@ -96,9 +135,7 @@ impl Sandbox<'_> {
         }
 
         self.bind_project(&mut command);
-        if let Some(installs) = &self.outside.toolchains.installs {
-            command.arg("--ro-bind").arg(installs).arg(installs);
-        }
+        self.bind_toolchains(&mut command);
         command
             .arg("--ro-bind")
             .arg(claude_binary)
@@ -106,11 +143,17 @@ impl Sandbox<'_> {
             .arg("--bind")
             .arg(&self.profile)
             .arg("/profile")
+            .arg("--bind")
+            .arg(&self.build_dir)
+            .arg(BUILD_INSIDE)
             .arg("--ro-bind")
             .arg(&self.outside.proxy_socket)
             .arg("/run/proxy.sock");
         if let Some(broker_socket) = &self.broker_socket {
             command.arg("--ro-bind").arg(broker_socket).arg(BROKER_INSIDE);
+        }
+        for (n, service) in self.services.iter().enumerate() {
+            command.arg("--ro-bind").arg(&service.socket).arg(format!("/run/service-{n}.sock"));
         }
 
         command
@@ -120,8 +163,29 @@ impl Sandbox<'_> {
             .args(["--setenv", "PATH", &self.outside.toolchains.path()])
             .args(["--setenv", "CLAUDE_CONFIG_DIR", "/profile"])
             .args(["--setenv", "HTTPS_PROXY", "http://127.0.0.1:3128"])
-            .args(["/usr/bin/bash", "-c", INSIDE, "sandbox"]);
+            .args(["--setenv", "CARGO_TARGET_DIR", BUILD_INSIDE])
+            .args(["--setenv", "CARGO_HOME", CARGO_INSIDE])
+            .args(["--setenv", "CARGO_NET_OFFLINE", "true"])
+            .args(["/usr/bin/bash", "-c", &inside(&self.services), "sandbox"]);
         command
+    }
+
+    /// mise's installs read-only, and Rust: the toolchain read-only, and
+    /// cargo's caches with a writable layer on top, because cargo unpacks
+    /// crates into its cache as it builds and would refuse a read-only one.
+    /// The layer is thrown away with the sandbox; the caches on the host are
+    /// never written.
+    fn bind_toolchains(&self, command: &mut Command) {
+        if let Some(installs) = &self.outside.toolchains.installs {
+            command.arg("--ro-bind").arg(installs).arg(installs);
+        }
+        if let Some(rust) = &self.outside.toolchains.rust {
+            command.arg("--ro-bind").arg(&rust.toolchain).arg(&rust.toolchain);
+            for cache in &rust.caches {
+                let name = cache.file_name().unwrap_or_default().to_string_lossy();
+                command.arg("--overlay-src").arg(cache).arg("--tmp-overlay").arg(format!("{CARGO_INSIDE}/{name}"));
+            }
+        }
     }
 
     /// bwrap, inside a scope of its own when there can be one. A scope runs
@@ -217,14 +281,19 @@ mod tests {
             outside: &outside,
             broker_socket: None,
             writable: true,
+            build_dir: PathBuf::from("/data/builds/abc"),
+            services: vec![Service { port: 33380, socket: PathBuf::from("/run/anna/service-h1-0.sock") }],
         });
 
         assert!(arguments.contains(&"--unshare-all".to_string()));
         let git = format!("{project_path}/.git");
         assert_eq!(
             binds(&arguments, "--bind"),
-            [(project_path, "/work"), (git.as_str(), "/work/.git"), ("/data/hands/h1/profile", "/profile")]
+            [(project_path, "/work"), (git.as_str(), "/work/.git"), ("/data/hands/h1/profile", "/profile"), ("/data/builds/abc", BUILD_INSIDE)]
         );
+        assert!(binds(&arguments, "--ro-bind").contains(&("/run/anna/service-h1-0.sock", "/run/service-0.sock")));
+        assert!(arguments.last().unwrap() == "sandbox" && arguments[arguments.len() - 2].contains("TCP-LISTEN:33380,fork,bind=127.0.0.1 UNIX-CONNECT:/run/service-0.sock"));
+        assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "CARGO_TARGET_DIR" && it[2] == BUILD_INSIDE));
         let read_only = binds(&arguments, "--ro-bind");
         assert!(read_only.contains(&(format!("{git}/config").as_str(), "/work/.git/config")));
         assert!(read_only.contains(&(format!("{git}/hooks").as_str(), "/work/.git/hooks")));
@@ -258,8 +327,18 @@ mod tests {
             time_limit: Duration::from_secs(60),
             scopes: Outside::can_have_scopes(),
         };
+        let build_dir = root.join("build");
+        fs::create_dir_all(&build_dir).unwrap();
         let run = |project: &Path, script: &str| {
-            let sandbox = Sandbox { project: project.to_path_buf(), profile: root.join("profile"), outside: &outside, broker_socket: None, writable: true };
+            let sandbox = Sandbox {
+                project: project.to_path_buf(),
+                profile: root.join("profile"),
+                outside: &outside,
+                broker_socket: None,
+                writable: true,
+                build_dir: build_dir.clone(),
+                services: Vec::new(),
+            };
             let output = sandbox.claude(Path::new("/usr/bin/bash")).args(["-c", script]).env("ANNA_TEST_SECRET", "s3cret").output().unwrap();
             String::from_utf8_lossy(&output.stdout).into_owned()
         };
@@ -273,7 +352,75 @@ mod tests {
         assert!(plain.join("made-it").exists(), "the project itself is still writable");
         assert_eq!(run(&worktree, attempts).trim(), "done");
         assert_eq!(fs::read_to_string(worktree.join(".git")).unwrap(), "gitdir: /somewhere/real\n");
+        assert_eq!(run(&plain, "touch /build/made-here && echo built").trim(), "built");
+        assert!(build_dir.join("made-here").exists(), "builds land in the folder given for them");
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A hand with Rust and a bridged service, for real: a crate with a
+    /// dependency builds offline from the host's cache, and a listener on
+    /// the host's loopback answers on the sandbox's.
+    #[test]
+    fn a_hand_builds_offline_and_reaches_a_service_it_was_granted() {
+        if crate::paths::program("bwrap").is_none() || crate::paths::program("socat").is_none() {
+            return;
+        }
+        let toolchains = Toolchains::discover();
+        let Some(rust) = &toolchains.rust else {
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("anna-sandbox-rust-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let project = root.join("crate");
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::create_dir_all(root.join("profile")).unwrap();
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::write(root.join("proxy.sock"), "").unwrap();
+        // A dependency that is in the host's cache because Anna herself uses it
+        fs::write(project.join("Cargo.toml"), "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nlibc = \"0.2\"\n").unwrap();
+        fs::write(project.join("src/main.rs"), "fn main() { println!(\"pid {}\", unsafe { libc::getpid() } > 0); }\n").unwrap();
+        let fetched = Command::new(rust.toolchain.join("bin/cargo")).args(["generate-lockfile", "--offline"]).current_dir(&project).output().unwrap();
+        assert!(fetched.status.success(), "{}", String::from_utf8_lossy(&fetched.stderr));
+
+        // Something on the host's loopback to reach: a shell answering one line
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut connection, _)) = listener.accept() {
+                let _ = std::io::Write::write_all(&mut connection, b"hello from the host\n");
+            }
+        });
+        let socket = root.join("service.sock");
+        let mut bridge = Command::new("socat")
+            .arg(format!("UNIX-LISTEN:{},fork", socket.display()))
+            .arg(format!("TCP:127.0.0.1:{port}"))
+            .spawn()
+            .unwrap();
+        while !socket.exists() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let outside = Outside { proxy_socket: root.join("proxy.sock"), toolchains, time_limit: Duration::from_secs(60), scopes: Outside::can_have_scopes() };
+        let sandbox = Sandbox {
+            project: project.clone(),
+            profile: root.join("profile"),
+            outside: &outside,
+            broker_socket: None,
+            writable: true,
+            build_dir: root.join("build"),
+            services: vec![Service { port, socket: socket.clone() }],
+        };
+        let script = format!("cargo run -q 2>&1; ls /build | head -1; echo | socat - TCP:127.0.0.1:{port}; cat ~/.cargo/credentials.toml 2>/dev/null && echo LEAKED");
+        let output = sandbox.claude(Path::new("/usr/bin/bash")).args(["-c", &script]).output().unwrap();
+        let said = String::from_utf8_lossy(&output.stdout);
+        let _ = bridge.kill();
+
+        assert!(said.contains("pid true"), "the crate built and ran offline:\n{said}\n{}", String::from_utf8_lossy(&output.stderr));
+        assert!(said.contains("debug"), "and built into /build:\n{said}");
+        assert!(said.contains("hello from the host"), "and the service answered:\n{said}");
+        assert!(!said.contains("LEAKED"));
+        assert!(root.join("build/debug").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -285,6 +432,7 @@ mod tests {
             toolchains: Toolchains {
                 installs: Some(installs.clone()),
                 bins: vec![installs.join("ruby/3.4.7/bin")],
+                rust: None,
             },
             time_limit: Duration::from_secs(60),
             scopes: true,
@@ -295,6 +443,8 @@ mod tests {
             outside: &outside,
             broker_socket: Some(PathBuf::from("/run/anna/hand-h1.sock")),
             writable: false,
+            build_dir: PathBuf::from("/data/builds/abc"),
+            services: Vec::new(),
         });
 
         let bwrap = arguments.iter().position(|it| it == "bwrap").expect("with a scope to be had, bwrap runs inside one");
@@ -302,7 +452,7 @@ mod tests {
         assert!(arguments[..bwrap].iter().any(|it| it.starts_with("MemoryMax=")));
         assert!(arguments[..bwrap].iter().any(|it| it.starts_with("TasksMax=")));
 
-        assert_eq!(binds(&arguments, "--bind"), [("/data/reviews/r1/profile", "/profile")]);
+        assert_eq!(binds(&arguments, "--bind"), [("/data/reviews/r1/profile", "/profile"), ("/data/builds/abc", BUILD_INSIDE)]);
         assert!(binds(&arguments, "--ro-bind").contains(&(installs.to_str().unwrap(), installs.to_str().unwrap())));
         assert!(arguments.windows(3).any(|it| {
             it[0] == "--setenv" && it[1] == "PATH" && it[2] == "/home/someone/.local/share/mise/installs/ruby/3.4.7/bin:/usr/bin"

@@ -12,10 +12,10 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 use std::fs;
-use std::path::Path;
 
 use crate::claude::{self, Started};
 use crate::clock;
+use crate::hand::Hand;
 use crate::logs;
 use crate::paths;
 use crate::sandbox::{Outside, Sandbox};
@@ -30,27 +30,33 @@ pub struct Verdict {
     pub notes: String,
 }
 
-pub fn review(hand: &str, project: &Path, brief: &str, report: &str, outside: &Outside, started: &Started) -> Result<Verdict> {
+pub fn review(hand: &Hand, brief: &str, report: &str, outside: &Outside, started: &Started) -> Result<Verdict> {
+    let project = hand.project();
+    let hand_id = hand.id();
     let directory = paths::sessions_dir().join(format!("r{:x}", clock::nanos()));
-    logs::event("review.started", json!({ "hand": hand, "project": project }));
+    logs::event("review.started", json!({ "hand": hand_id, "project": project }));
     claude::write_hand_profile(&directory.join("profile"))?;
 
+    // The same builds and services as the hand, so the reviewer can run
+    // what the hand ran and see for itself
     let sandbox = Sandbox {
         project: project.to_path_buf(),
         profile: directory.join("profile"),
         outside,
         broker_socket: None,
         writable: false,
+        build_dir: hand.build_dir().to_path_buf(),
+        services: hand.services().to_vec(),
     };
     let mut command = sandbox.claude(&claude::binary()?);
     command.args(["--dangerously-skip-permissions", "--strict-mcp-config"]);
 
     let outcome = claude::reply_of(&mut command, &prompt(brief, report), outside.time_limit, Some(started));
-    transcripts::keep(&directory.join("profile"), hand, true);
+    transcripts::keep(&directory.join("profile"), hand_id, true);
     let _ = fs::remove_dir_all(&directory);
 
     let verdict = verdict_in(&outcome?.result)?;
-    logs::event("review.finished", json!({ "hand": hand, "accepted": verdict.accepted }));
+    logs::event("review.finished", json!({ "hand": hand_id, "accepted": verdict.accepted }));
     Ok(verdict)
 }
 

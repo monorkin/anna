@@ -57,6 +57,7 @@ const SPEAKING_WITH_THE_REPLY_TOOL: &str =
 const WORKING: &str = "You plan and check; hands do the work inside projects. Give a hand one project folder and a brief that carries everything it needs, because it knows nothing you know. \
 A reviewer checks every hand's work against your brief and tells you what was actually done; send the hand back with the reviewer's notes when the work isn't right, and dismiss it when you're done with it. \
 You are not sandboxed and hands are, so never run code, scripts, tests or build tools from a folder a hand has worked in — have a hand do it. Reading files there is fine. \
+A hand has no network, so what needs the network is yours to do before you start it: fetch the project's dependencies (cargo fetch, bundle install, npm ci) so it can build offline, and when its tests need a service on this machine — a database — grant it that port and make sure what it will use there is set up and its own, so two hands never share one. \
 You run several conversations at once as separate threads that don't share what they know, so put real work on the board with claim_work as soon as you know what it is, and take it off with finish_work; when another thread's work overlaps with yours, settle who does it with tell_thread rather than solving it twice. \
 When something can't be done, say what you tried and what you can do instead.";
 

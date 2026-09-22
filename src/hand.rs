@@ -8,22 +8,28 @@
 use anyhow::{Context, Result, bail};
 use serde_json::json;
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use crate::broker::{self, Endpoint, Tool};
 use crate::claude::{self, Started};
 use crate::clock;
 use crate::logs;
 use crate::paths;
-use crate::sandbox::{self, Outside, Sandbox};
+use crate::sandbox::{self, Outside, Sandbox, Service};
 use crate::transcripts;
 
 pub struct Hand {
     id: String,
     project: PathBuf,
     directory: PathBuf,
+    build_dir: PathBuf,
     session: Option<String>,
     granted: Option<Endpoint>,
+    services: Vec<Service>,
+    bridges: Vec<Child>,
     asked: Vec<String>,
     rejections: u32,
 }
@@ -31,8 +37,11 @@ pub struct Hand {
 impl Hand {
     /// `grant` is every tool this hand may call through the broker. An empty
     /// grant means no broker at all: the hand can touch its project folder
-    /// and talk to Claude, nothing more.
-    pub fn start(project: &Path, grant: Vec<Box<dyn Tool>>) -> Result<Hand> {
+    /// and talk to Claude, nothing more. `ports` are services on this
+    /// machine's loopback the hand may reach — a database for its tests —
+    /// and only loopback: anything further is the network, which a hand
+    /// doesn't have.
+    pub fn start(project: &Path, grant: Vec<Box<dyn Tool>>, ports: &[u16]) -> Result<Hand> {
         let project = project
             .canonicalize()
             .with_context(|| format!("{} does not exist", project.display()))?;
@@ -44,6 +53,7 @@ impl Hand {
         let id = format!("h{:x}", clock::nanos());
         let directory = paths::sessions_dir().join(&id);
         claude::write_hand_profile(&directory.join("profile"))?;
+        let build_dir = sandbox::build_dir_of(&project)?;
 
         let granted_names: Vec<String> = grant.iter().map(|it| it.name().to_string()).collect();
         let granted = if grant.is_empty() {
@@ -51,17 +61,29 @@ impl Hand {
         } else {
             Some(Endpoint::open(&paths::socket(&format!("hand-{id}")), grant)?)
         };
+        let (services, bridges) = bridge(&id, ports)?;
 
-        logs::event("hand.started", json!({ "hand": id, "project": project, "grant": granted_names }));
+        logs::event("hand.started", json!({ "hand": id, "project": project, "grant": granted_names, "services": ports }));
         Ok(Hand {
             id,
             project,
             directory,
+            build_dir,
             session: None,
             granted,
+            services,
+            bridges,
             asked: Vec::new(),
             rejections: 0,
         })
+    }
+
+    pub fn services(&self) -> &[Service] {
+        &self.services
+    }
+
+    pub fn build_dir(&self) -> &Path {
+        &self.build_dir
     }
 
     pub fn id(&self) -> &str {
@@ -91,6 +113,8 @@ impl Hand {
             outside,
             broker_socket: self.granted.as_ref().map(|it| it.socket().to_path_buf()),
             writable: true,
+            build_dir: self.build_dir.clone(),
+            services: self.services.clone(),
         };
 
         let mut command = sandbox.claude(&claude::binary()?);
@@ -112,11 +136,53 @@ impl Hand {
         Ok(reply.result)
     }
 
-    pub fn discard(self) {
+    pub fn discard(mut self) {
+        for bridge in &mut self.bridges {
+            let _ = bridge.kill();
+            let _ = bridge.wait();
+        }
+        for service in &self.services {
+            let _ = fs::remove_file(&service.socket);
+        }
         transcripts::keep(&self.directory.join("profile"), &self.id, false);
         let _ = fs::remove_dir_all(&self.directory);
         logs::event("hand.discarded", json!({ "hand": self.id }));
     }
+}
+
+/// One socat on the host per port, listening on a socket of the hand's and
+/// connecting to the port on loopback. It dies with Anna, and is killed
+/// with the hand.
+fn bridge(hand: &str, ports: &[u16]) -> Result<(Vec<Service>, Vec<Child>)> {
+    let mut services = Vec::new();
+    let mut bridges = Vec::new();
+    for (n, port) in ports.iter().enumerate() {
+        let socket = paths::socket(&format!("service-{hand}-{n}"));
+        let _ = fs::remove_file(&socket);
+        let mut command = Command::new("socat");
+        command
+            .arg(format!("UNIX-LISTEN:{},fork,mode=600", socket.display()))
+            .arg(format!("TCP:127.0.0.1:{port}"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+        bridges.push(command.spawn().with_context(|| format!("could not bridge port {port} into the sandbox"))?);
+        services.push(Service { port: *port, socket });
+    }
+    // socat binds its socket after starting; the sandbox binds the file in
+    for service in &services {
+        let began = std::time::Instant::now();
+        while !service.socket.exists() && began.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    Ok((services, bridges))
 }
 
 /// A hand writes its project, and the brain acts on what it finds there, so

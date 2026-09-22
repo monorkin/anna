@@ -219,15 +219,23 @@ Not built, or not working yet:
   a hand can get, don't exist yet — that needs your call on the shape.
 - **Real sources.** Anna has no account of her own anywhere, so no source has
   been configured against a real server.
-- **Dependencies and Rust in the sandbox.** mise's tools are there now: its
-  installs folder is bound read-only and on the hand's PATH, listed from the
-  home directory so a hand's own `mise.toml` is never read on the host. What
-  is still missing is anything that needs a registry — `bundle install`,
-  `npm install`, `cargo build` — since a hand has no network, and Rust itself,
-  which lives under cargo's and rustup's folders next to credentials. Likely
-  answer: registries as something the proxy can be told to allow per hand.
-- The classifier-driven dispatcher (routing, model choice), and transcripts
-  of hands being kept for memory.
+- **Dependencies, Rust and services in the sandbox** — decided the other way
+  round from "registries through the proxy": hands keep having no network,
+  and what needs it is the brain's to do first. The brain fetches the
+  project's dependencies before starting a hand; the hand builds offline.
+  Rust goes in from rustup's folder (the default toolchain when installed,
+  stable otherwise) and cargo's caches go in with a writable layer on top,
+  never the registry token next to them. Builds land in a folder of Anna's
+  per project, not the project's `target`, which is often a link into a
+  cache the sandbox can't see. A hand can be granted ports on this
+  machine's loopback — a database for its tests — bridged in with socat the
+  way the proxy is, and the reviewer gets the same. Keeping a test database
+  per hand is the brain's, in the brief. Gems and node packages aren't
+  bound in yet; mise's tools are, and `bundle install` after a `bundle
+  package` would work the same way.
+- The classifier-driven dispatcher (routing, model choice), and hand
+  transcripts kept for memory. Hands' transcripts are kept now, under
+  `data/hands`, for `anna transcript`; memory doesn't read them yet.
 
 ### After codex's review (2026-09-21)
 
@@ -514,7 +522,7 @@ Next:
    Anna as an agent in a real Basecamp account, end to end.
 3. The config as a ceiling: who may ask for what, the widest grant, a per-task
    budget.
-4. Registries through the proxy, per hand; Rust inside the sandbox.
+4. Gems and node packages into the sandbox the way cargo's crates are.
 5. katami `origin` and speaker; hand transcripts into memory through the Jev
    risk score.
 6. Moving a running hand to another account.
