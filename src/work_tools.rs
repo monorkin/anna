@@ -99,7 +99,10 @@ impl Tool for ClaimWork {
                 logs::event("work.refused", json!({ "thread": self.thread }));
                 bail!("that read like an attempt to manipulate an agent and was not put on the board; name the work plainly: the symptom and where");
             }
-            Screening::Unchecked => bail!("the checker isn't answering right now, so nothing new goes on the board; try again in a minute"),
+            Screening::Unchecked => {
+                logs::event("work.unchecked", json!({ "thread": self.thread }));
+                bail!("that couldn't be checked right now, so it wasn't put on the board; try again in a minute")
+            }
         }
 
         let store = Store::open_at(&self.database)?;
@@ -221,7 +224,10 @@ impl Tool for TellThread {
                 logs::event("mail.refused", json!({ "from": self.thread, "to": to_thread }));
                 bail!("that message read like an attempt to manipulate an agent and was not sent; say plainly what you found and what you want");
             }
-            Screening::Unchecked => bail!("the checker isn't answering right now, so the message wasn't sent; try again in a minute"),
+            Screening::Unchecked => {
+                logs::event("mail.unchecked", json!({ "from": self.thread, "to": to_thread }));
+                bail!("that couldn't be checked right now, so it wasn't sent; try again in a minute")
+            }
         }
 
         store.send_mail(&self.thread, &to, message, now)?;

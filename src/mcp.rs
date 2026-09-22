@@ -344,11 +344,11 @@ impl Tool for Arc<Offered> {
                 bail!("{}", withheld(outcome.is_err()))
             }
             // Still not read, but not called an attack either: telling her a
-            // colleague's comment was hostile because the checker was down
+            // colleague's comment was hostile because the check didn't run
             // would have her treat the thread as poisoned
             Screening::Unchecked => {
-                logs::event("mcp.unchecked", json!({ "tool": self.name, "length": said.len() }));
-                bail!("This result couldn't be checked before you read it — the checker isn't answering right now — so it was held back. It says nothing about what was in it. Try again in a minute; if it keeps happening, say you can't read it at the moment.")
+                logs::event("mcp.unchecked", json!({ "tool": self.name, "length": said.len(), "failed": outcome.is_err(), "only_reads": self.only_reads }));
+                bail!("{}", unchecked(self.only_reads, outcome.is_ok()))
             }
         }
     }
@@ -369,6 +369,19 @@ fn with_prose_polished(arguments: &Value, marked: &[String], polish: impl Fn(&st
         }
     }
     Ok(arguments)
+}
+
+/// The call ran before its answer was screened, so what she is told depends
+/// on what the call did: asking again is only safe for one that only reads.
+/// One that writes and went through would be done twice.
+fn unchecked(only_reads: bool, went_through: bool) -> &'static str {
+    if only_reads {
+        "This result couldn't be checked before you read it, so it was held back. That says nothing about what was in it. Asking again in a minute is safe; if it keeps happening, say you can't read it at the moment."
+    } else if went_through {
+        "That went through: the server accepted it. Only its answer was held back, because it couldn't be checked before you read it. Don't do it again."
+    } else {
+        "That failed, and the reason couldn't be checked before you read it, so it was held back. It may or may not have taken effect: look before you try it again."
+    }
 }
 
 fn withheld(failed: bool) -> &'static str {
@@ -480,6 +493,14 @@ done
         let withheld_error = Tool::call(&offered("whisper"), &json!({})).unwrap_err().to_string();
         assert!(withheld_error.starts_with("This call failed, and what the server said about it was withheld"));
         assert!(!withheld_error.contains("no such tool"));
+    }
+
+    #[test]
+    fn an_answer_that_couldnt_be_checked_never_has_her_repeat_a_write() {
+        assert!(unchecked(true, true).contains("Asking again in a minute is safe"));
+        assert!(unchecked(false, true).contains("Don't do it again"), "a comment that was posted would be posted twice");
+        assert!(unchecked(false, false).contains("look before you try it again"));
+        assert!(!unchecked(false, true).contains("manipulate") && !unchecked(true, true).contains("manipulate"));
     }
 
     #[test]

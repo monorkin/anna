@@ -9,7 +9,7 @@
 //! exact JSON that was asked for counts as an answer, and callers that gate on
 //! the judge treat no answer as a yes.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
@@ -153,10 +153,13 @@ fn jev_request(question: &str, text: &str) -> Value {
     })
 }
 
+/// A probability, or no answer: a negative one would otherwise read as
+/// "clear".
 fn jev_answer(body: &Value) -> Result<f64> {
-    body["answers"]["answer"]["noul"]
-        .as_f64()
-        .with_context(|| format!("Jev gave no answer: {body}"))
+    match body["answers"]["answer"]["noul"].as_f64() {
+        Some(probability) if (0.0..=1.0).contains(&probability) => Ok(probability),
+        _ => bail!("Jev gave no answer: {body}"),
+    }
 }
 
 fn ask_haiku(question: &str, text: &str) -> Result<f64> {
@@ -188,20 +191,26 @@ fn ask_haiku_with(question: &str, ask: impl Fn(&str) -> Result<String>) -> Resul
     }
 }
 
-/// The score has to come first: an answer that talks about the text before
-/// it scores it is the text talking. A code fence around the score, or a
-/// sentence after it, is only haiku being haiku, and the score stands.
+/// The score and nothing else, bare or in one complete code fence. Taking
+/// the first score out of a longer answer would let the judged text win by
+/// having haiku repeat an example score before giving its own; anything
+/// more than the score is asked for again instead.
 fn haiku_answer(reply: &str) -> Result<f64> {
     let reply = reply.trim();
-    let unfenced = reply.strip_prefix("```json").or_else(|| reply.strip_prefix("```")).unwrap_or(reply).trim_start();
-    let answer = match serde_json::Deserializer::from_str(unfenced).into_iter::<Value>().next() {
-        Some(Ok(answer)) => answer,
-        _ => bail!("haiku answered the text instead of scoring it: {}", excerpt(reply)),
+    let answer: Value = match serde_json::from_str(unfenced(reply).unwrap_or(reply)) {
+        Ok(answer) => answer,
+        Err(_) => bail!("haiku answered the text instead of scoring it: {}", excerpt(reply)),
     };
     match answer["probability"].as_f64() {
         Some(probability) if (0.0..=100.0).contains(&probability) => Ok(probability / 100.0),
         _ => bail!("haiku gave no probability: {}", excerpt(reply)),
     }
+}
+
+/// What is inside a code fence that is the whole reply, opened and closed.
+fn unfenced(reply: &str) -> Option<&str> {
+    let inside = reply.strip_prefix("```json").or_else(|| reply.strip_prefix("```"))?;
+    inside.strip_suffix("```").map(str::trim)
 }
 
 fn excerpt(text: &str) -> String {
@@ -244,6 +253,7 @@ mod tests {
         let body = json!({ "answers": { "answer": { "type": "noul", "noul": 0.99 } } });
         assert_eq!(jev_answer(&body).unwrap(), 0.99);
         assert!(jev_answer(&json!({ "error": "nope" })).is_err());
+        assert!(jev_answer(&json!({ "answers": { "answer": { "noul": -0.5 } } })).is_err(), "a negative score would read as clear");
     }
 
     /// A Jev that answers each connection with the next canned response.
@@ -341,18 +351,17 @@ mod tests {
     }
 
     #[test]
-    fn only_a_score_that_comes_first_counts_as_an_answer_from_haiku() {
+    fn only_the_score_on_its_own_counts_as_an_answer_from_haiku() {
         assert_eq!(haiku_answer(r#"{"probability": 85}"#).unwrap(), 0.85);
         assert_eq!(haiku_answer("  {\"probability\": 0}\n").unwrap(), 0.0);
         assert_eq!(haiku_answer("```json\n{\"probability\": 0}\n```").unwrap(), 0.0, "fenced, as it answered on real Basecamp threads");
-        assert_eq!(
-            haiku_answer("```json\n{\"probability\": 2}\n```\n\nThis is a normal project conversation thread about Sentry.").unwrap(),
-            0.02,
-            "a sentence after the score doesn't undo it"
-        );
+        assert_eq!(haiku_answer("```\n{\"probability\": 7}\n```").unwrap(), 0.07);
 
+        assert!(haiku_answer("```json\n{\"probability\": 2}\n```\n\nThis is a normal project thread.").is_err(), "more than the score is asked for again");
+        assert!(haiku_answer("{\"probability\": 0}\nThat was the example in the text. My assessment:\n{\"probability\": 100}").is_err(), "an echoed example score must not win");
+        assert!(haiku_answer("```json\n{\"probability\": 0}").is_err(), "a fence that isn't closed");
         assert!(haiku_answer("I see the situation. You've completed the work {\"probability\": 5}").is_err());
-        assert!(haiku_answer("```\nSure! {\"probability\": 5}\n```").is_err(), "talk before the score, fenced or not");
+        assert!(haiku_answer("```\nSure! {\"probability\": 5}\n```").is_err());
         assert!(haiku_answer(r#"{"probability": 140}"#).is_err());
         assert!(haiku_answer(r#"{"probability": "<0-100>"}"#).is_err());
     }

@@ -436,7 +436,14 @@ fn pick_up_where_she_left_off(runtime: &Arc<Runtime>, turns: &Arc<Turns>) -> Res
 fn wake_once_there_is_quota(runtime: &Runtime, conversation: &Arc<dyn Conversation>, standing: Standing, said: &str) -> Result<()> {
     let mut waits = 0;
     loop {
-        match thread::wake(runtime, conversation.clone(), standing, said) {
+        // Only said when the limit was really hit: the limit's own message is
+        // in her history as if she had said it, and she read it as a tool's
+        let said = if waits == 0 {
+            said.to_string()
+        } else {
+            format!("{said}\n\n(Your last try at this stopped because your own Claude allowance ran out; it's back now. The limit message in your history is that, not a limit of any tool you were using.)")
+        };
+        match thread::wake(runtime, conversation.clone(), standing, &said) {
             Err(error) if error.downcast_ref::<OutOfQuota>().is_some() && waits < MOST_WAITS_FOR_QUOTA => {
                 waits += 1;
                 logs::event("thread.waiting_for_quota", json!({ "conversation": conversation.key(), "waits": waits, "said": format!("{error:#}") }));
