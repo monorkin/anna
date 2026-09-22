@@ -33,7 +33,7 @@ use crate::paths;
 use crate::runtime::Runtime;
 use crate::schedule_tools::{CancelSchedule, ListSchedules, Schedule};
 use crate::work_tools::{self, ClaimWork, FinishWork, ListWork, TellThread};
-use crate::thread_tools::{Dismiss, Hands, Reply, SendBack, StartHand, Workshop};
+use crate::thread_tools::{ClaudeUsage, Dismiss, Hands, Reply, SendBack, StartHand, Workshop};
 
 const TOOL_TIMEOUT_MILLISECONDS: &str = "7200000";
 
@@ -95,6 +95,10 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
         }));
     }
     tools.extend(tools_for_later_and_for_others(runtime, conversation.as_ref(), standing));
+    // It names the accounts she works as: for the people she works for
+    if standing == Standing::Trusted {
+        tools.push(Box::new(ClaudeUsage));
+    }
     tools.extend(runtime.catalog.for_standing(standing));
     let endpoint = Endpoint::open(&paths::socket(&format!("thread-{key}")), tools)?;
 

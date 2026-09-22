@@ -174,6 +174,33 @@ impl Tool for SendBack {
     }
 }
 
+/// How her Claude allowance is doing, read from ax: each account she can
+/// work as, its session, weekly and Fable limits, and when they reset.
+pub struct ClaudeUsage;
+
+impl Tool for ClaudeUsage {
+    fn name(&self) -> &str {
+        "claude_usage"
+    }
+
+    fn description(&self) -> &str {
+        "How much of your Claude allowance is used on each account you can work as — the session, weekly and Fable limits and when each resets — and which account you're on now. Use it when someone asks how your tokens or limits are doing, and answer in your own words."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    fn call(&self, _arguments: &Value) -> Result<String> {
+        let reports = ax::usage::of_every_account()?;
+        if reports.is_empty() {
+            Ok("No accounts are stored for you, so there is nothing to read usage from. `anna claude account add` stores the one you're logged in as.".to_string())
+        } else {
+            Ok(ax::usage::described(&reports, ax::clock::now_seconds()))
+        }
+    }
+}
+
 pub struct Dismiss {
     pub hands: Arc<Hands>,
 }
