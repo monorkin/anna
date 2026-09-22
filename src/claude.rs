@@ -157,6 +157,11 @@ impl std::fmt::Display for OutOfQuota {
 
 impl std::error::Error for OutOfQuota {}
 
+/// A resume that found nothing: "No conversation found with session ID …".
+pub fn says_the_session_is_gone(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("No conversation found with session ID")
+}
+
 /// Claude Code says it in a sentence, not a code: "You've hit your session
 /// limit · resets 8:20pm", "Claude usage limit reached".
 fn says_the_subscription_is_used_up(said: &str) -> bool {

@@ -94,14 +94,24 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
     let endpoint = Endpoint::open(&paths::socket(&format!("thread-{key}")), tools)?;
 
     logs::event("thread.woken", json!({ "conversation": key }));
-    let session = Session::of(&directory)?;
+    let mut session = Session::of(&directory)?;
     let memory = Supervision::begin(&directory, &key)?;
-    let message = with_the_board(runtime, conversation.as_ref(), message);
+    let mut message = with_the_board(runtime, conversation.as_ref(), message);
     let role = role(runtime, standing, answered_otherwise.as_deref());
     let mut command = turn(&directory, &endpoint, &session, standing, &role)?;
     memory.cover(&mut command);
 
-    let outcome = claude::reply_of(&mut command, &message, runtime.outside.time_limit, None);
+    let mut outcome = claude::reply_of(&mut command, &message, runtime.outside.time_limit, None);
+    if session.begun && outcome.as_ref().is_err_and(|error| claude::says_the_session_is_gone(error)) {
+        // Claude's folder no longer has the session — it moved, or was
+        // cleaned out — so the conversation starts over, and says so
+        logs::event("thread.session_gone", json!({ "conversation": key, "session": session.id }));
+        session = Session::fresh(&directory)?;
+        message = format!("{message}\n\n(Your earlier session in this conversation is gone, so you are starting from here without its history.)");
+        let mut again = turn(&directory, &endpoint, &session, standing, &role)?;
+        memory.cover(&mut again);
+        outcome = claude::reply_of(&mut again, &message, runtime.outside.time_limit, None);
+    }
     memory.finish();
     hands.discard_all();
 
@@ -185,6 +195,12 @@ impl Session {
             Ok(id) => Ok(Session { id: id.trim().to_string(), file, begun: true }),
             Err(_) => Ok(Session { id: random_uuid()?, file, begun: false }),
         }
+    }
+
+    fn fresh(directory: &Path) -> Result<Session> {
+        let file = directory.join("session");
+        let _ = fs::remove_file(&file);
+        Ok(Session { id: random_uuid()?, file, begun: false })
     }
 
     fn keep(&self) -> Result<()> {
