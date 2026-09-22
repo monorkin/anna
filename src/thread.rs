@@ -258,6 +258,10 @@ fn role(runtime: &Runtime, standing: Standing, answered_otherwise: Option<&str>)
         role.push_str("\n\n");
         role.push_str(personality);
     }
+    if let Some(style) = &runtime.style {
+        role.push_str("\n\nHow you write, to anyone, anywhere:\n\n");
+        role.push_str(style);
+    }
     role
 }
 

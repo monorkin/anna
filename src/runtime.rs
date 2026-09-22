@@ -27,6 +27,10 @@ pub struct Runtime {
     pub config: Config,
     pub database: PathBuf,
     pub personality: Option<String>,
+    /// How she writes: the editor holds her to it after the fact, and every
+    /// thread is told it up front, so most of what she writes needs no
+    /// rewriting.
+    pub style: Option<String>,
     pub judge: Arc<Judge>,
     pub editor: Arc<Editor>,
     pub catalog: Arc<Catalog>,
@@ -41,7 +45,8 @@ impl Runtime {
 
         let config = Config::load()?;
         let judge = Arc::new(Judge::with_whatever_is_set_up(&config));
-        let editor = Arc::new(Editor::new(config::style()?, judge.clone()));
+        let style = config::style()?;
+        let editor = Arc::new(Editor::new(style.clone(), judge.clone()));
         let personality = config::personality()?;
         let catalog = Arc::new(Catalog::open(&config, editor.clone(), judge.clone()));
         let proxy = Proxy::start(&paths::socket("proxy"), &[proxy::CLAUDE_API])?;
@@ -62,6 +67,7 @@ impl Runtime {
             config,
             database,
             personality,
+            style,
             judge,
             editor,
             catalog,

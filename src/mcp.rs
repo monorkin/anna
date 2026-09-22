@@ -328,12 +328,7 @@ impl Tool for Arc<Offered> {
     }
 
     fn call(&self, arguments: &Value) -> Result<String> {
-        let mut arguments = arguments.clone();
-        for name in &self.prose_arguments {
-            if let Some(text) = arguments[name].as_str() {
-                arguments[name] = Value::from(self.editor.polish(text)?);
-            }
-        }
+        let arguments = with_prose_polished(arguments, &self.prose_arguments, |text| self.editor.polish(text))?;
 
         // An error is the server's text as much as a result is: a refusal
         // that quotes what it was sent carries whatever an attacker put there
@@ -348,6 +343,23 @@ impl Tool for Arc<Offered> {
         }
         outcome
     }
+}
+
+/// Every argument marked as prose, put through the editor. A mark is a
+/// top-level argument's name, or a JSON pointer into a gateway tool's
+/// `params` (`/params/content`). One that finds no text is left alone.
+fn with_prose_polished(arguments: &Value, marked: &[String], polish: impl Fn(&str) -> Result<String>) -> Result<Value> {
+    let mut arguments = arguments.clone();
+    for mark in marked {
+        let pointer = if mark.starts_with('/') { mark.clone() } else { format!("/{mark}") };
+        if let Some(text) = arguments.pointer(&pointer).and_then(Value::as_str).map(String::from) {
+            let polished = polish(&text)?;
+            if let Some(place) = arguments.pointer_mut(&pointer) {
+                *place = Value::from(polished);
+            }
+        }
+    }
+    Ok(arguments)
 }
 
 fn withheld(failed: bool) -> &'static str {
@@ -492,6 +504,14 @@ done
         assert!(writes.contains("can change things out there"), "a server added today has no prose marked, and still can't post through a hand");
         assert!(catalog.grant(&["mail_digest".to_string()]).err().unwrap().to_string().contains("speaks to people"));
         assert_eq!(catalog.all().len(), 3, "the thread itself still gets everything");
+    }
+
+    #[test]
+    fn prose_is_found_by_name_or_by_pointer_into_params() {
+        let arguments = json!({ "action": "create_comment", "params": { "content": "hi there", "recordingId": 3 }, "text": "top" });
+        let marked = vec!["/params/content".to_string(), "text".to_string(), "/params/missing".to_string(), "nope".to_string()];
+        let polished = with_prose_polished(&arguments, &marked, |text| Ok(text.to_uppercase())).unwrap();
+        assert_eq!(polished, json!({ "action": "create_comment", "params": { "content": "HI THERE", "recordingId": 3 }, "text": "TOP" }));
     }
 
     #[test]

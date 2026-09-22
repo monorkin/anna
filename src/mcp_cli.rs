@@ -26,18 +26,32 @@ fn say_if_she_has_to_restart() {
 
 /// Adding without a word, for setup, which has its own way of saying things.
 pub fn register(name: &str, command: &[String], env: BTreeMap<String, String>) -> Result<()> {
+    register_with_prose(name, command, env, BTreeMap::new())
+}
+
+/// `prose` is what setup already knows carries text for people on this
+/// server — a tool name to its arguments, an argument being a name or a
+/// JSON pointer into a gateway tool's params.
+pub fn register_with_prose(name: &str, command: &[String], env: BTreeMap<String, String>, prose: BTreeMap<String, Vec<String>>) -> Result<()> {
     let (program, args) = command.split_first().context("give the command that starts the server after --")?;
     let mut settings = McpServer {
         command: program.clone(),
         args: args.to_vec(),
         env,
-        prose: BTreeMap::new(),
+        prose,
         fingerprint: None,
     };
 
     let mut config = Config::load()?;
     if let Some(existing) = config.mcp_servers.get(name) {
-        settings.prose = existing.prose.clone();
+        for (tool, arguments) in &existing.prose {
+            let marked = settings.prose.entry(tool.clone()).or_default();
+            for argument in arguments {
+                if !marked.contains(argument) {
+                    marked.push(argument.clone());
+                }
+            }
+        }
         if settings.env.is_empty() {
             settings.env = existing.env.clone();
         }

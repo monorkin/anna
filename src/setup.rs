@@ -599,6 +599,22 @@ fn basecamp_notifications_source(profile: Option<&str>, account: &str, watches: 
     }
 }
 
+/// What carries text for people on each tool's server, so the editor sees
+/// it and hands never get it. Basecamp's tools are gateways: one tool per
+/// area, the action's arguments under `params`.
+fn prose_of(tool: &str) -> BTreeMap<String, Vec<String>> {
+    match tool {
+        "basecamp" => BTreeMap::from([
+            ("basecamp_messages".to_string(), words(&["/params/content", "/params/subject"])),
+            ("basecamp_todos".to_string(), words(&["/params/content", "/params/description"])),
+            ("basecamp_campfires".to_string(), words(&["/params/content"])),
+            ("basecamp_cards".to_string(), words(&["/params/content", "/params/title"])),
+        ]),
+        "hey" => BTreeMap::from([("hey_threads".to_string(), words(&["/params/body", "/params/subject"]))]),
+        _ => BTreeMap::new(),
+    }
+}
+
 /// The environment a tool runs in when the agent has a profile of its own
 /// there: its config lives in the agent's folder, not the person's.
 fn own_tool_config() -> BTreeMap<String, String> {
@@ -789,7 +805,7 @@ impl Doing for Machine {
     }
 
     fn add_server(&mut self, name: &str, command: &[String], env: BTreeMap<String, String>) -> Result<()> {
-        mcp_cli::register(name, command, env)
+        mcp_cli::register_with_prose(name, command, env, prose_of(name))
     }
 
     fn add_source(&mut self, name: &str, source: Source) -> Result<()> {
