@@ -113,6 +113,12 @@ pub fn all_sessions_dir() -> PathBuf {
     data_dir().join("sessions")
 }
 
+/// What hands left behind once they were discarded: their transcripts and
+/// their reviews', by hand.
+pub fn hands_dir() -> PathBuf {
+    data_dir().join("hands")
+}
+
 pub fn source_dir(name: &str) -> PathBuf {
     data_dir().join("sources").join(name)
 }

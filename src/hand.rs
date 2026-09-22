@@ -16,6 +16,7 @@ use crate::clock;
 use crate::logs;
 use crate::paths;
 use crate::sandbox::{self, Outside, Sandbox};
+use crate::transcripts;
 
 pub struct Hand {
     id: String,
@@ -112,6 +113,7 @@ impl Hand {
     }
 
     pub fn discard(self) {
+        transcripts::keep(&self.directory.join("profile"), &self.id, false);
         let _ = fs::remove_dir_all(&self.directory);
         logs::event("hand.discarded", json!({ "hand": self.id }));
     }

@@ -19,6 +19,7 @@ use crate::clock;
 use crate::logs;
 use crate::paths;
 use crate::sandbox::{Outside, Sandbox};
+use crate::transcripts;
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Verdict {
@@ -45,6 +46,7 @@ pub fn review(hand: &str, project: &Path, brief: &str, report: &str, outside: &O
     command.args(["--dangerously-skip-permissions", "--strict-mcp-config"]);
 
     let outcome = claude::reply_of(&mut command, &prompt(brief, report), outside.time_limit, Some(started));
+    transcripts::keep(&directory.join("profile"), hand, true);
     let _ = fs::remove_dir_all(&directory);
 
     let verdict = verdict_in(&outcome?.result)?;

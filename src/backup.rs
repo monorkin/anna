@@ -35,6 +35,7 @@ use crate::fsutil;
 use crate::paths;
 use crate::secrets;
 use crate::store::Store;
+use crate::transcripts;
 
 const MANIFEST: &str = "manifest.json";
 const SECRETS: &str = "secrets.json";
@@ -133,12 +134,13 @@ impl Archive {
     fn add_data_files(&mut self) -> Result<()> {
         self.add_file_if_there(&paths::log_file(), "data/log.jsonl")?;
         self.add_tree(&paths::data_dir().join("threads"), "data/threads")?;
+        self.add_tree(&paths::hands_dir(), "data/hands")?;
         self.add_tree(&paths::data_dir().join("sources"), "data/sources")
     }
 
     fn add_transcripts(&mut self) -> Result<()> {
         for thread in names_in(&paths::data_dir().join("threads")) {
-            let transcripts = transcripts_of(&thread);
+            let transcripts = transcripts::of_thread(&thread);
             self.add_tree(&transcripts, &format!("transcripts/{thread}"))?;
         }
         Ok(())
@@ -272,7 +274,7 @@ fn destination_of(name: &str) -> Result<Option<PathBuf>> {
         Some("data") => Some(paths::data_dir().join(parts.collect::<PathBuf>())),
         Some("transcripts") => parts
             .next()
-            .map(|thread| transcripts_of(&thread).join(parts.collect::<PathBuf>())),
+            .map(|thread| transcripts::of_thread(&thread).join(parts.collect::<PathBuf>())),
         _ => None,
     };
     Ok(destination)
@@ -347,17 +349,6 @@ fn staging(name: &str) -> Result<PathBuf> {
     Ok(directory.join(format!("{}-{name}", std::process::id())))
 }
 
-/// Claude Code keeps a folder's transcripts under the folder's absolute path
-/// with everything but letters and digits turned into dashes.
-fn transcripts_of(thread: &str) -> PathBuf {
-    let folder: String = paths::thread_dir(thread)
-        .to_string_lossy()
-        .chars()
-        .map(|it| if it.is_ascii_alphanumeric() { it } else { '-' })
-        .collect();
-    paths::claude_config_home().join("projects").join(folder)
-}
-
 fn names_in(directory: &Path) -> Vec<String> {
     match fs::read_dir(directory) {
         Ok(entries) => entries.flatten().map(|it| it.file_name().to_string_lossy().into_owned()).collect(),
@@ -378,7 +369,7 @@ mod tests {
         );
         assert_eq!(
             destination_of("transcripts/terminal-main/abc.jsonl").unwrap(),
-            Some(transcripts_of("terminal-main").join("abc.jsonl"))
+            Some(transcripts::of_thread("terminal-main").join("abc.jsonl"))
         );
         assert_eq!(destination_of("manifest.json").unwrap(), None);
         assert_eq!(destination_of("something/else").unwrap(), None);
@@ -389,7 +380,7 @@ mod tests {
 
     #[test]
     fn transcripts_are_found_the_way_claude_code_names_them() {
-        let folder = transcripts_of("terminal-main");
+        let folder = transcripts::of_thread("terminal-main");
         let name = folder.file_name().unwrap().to_string_lossy().into_owned();
 
         assert!(name.starts_with('-'));

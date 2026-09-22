@@ -32,6 +32,7 @@ mod store;
 mod thread;
 mod thread_tools;
 mod toolchains;
+mod transcripts;
 mod work_tools;
 
 use anyhow::Result;
@@ -95,6 +96,8 @@ enum Command {
         #[usage(long)]
         only: Option<String>,
     },
+    /// Read what was said in a thread or a hand; lists them when no id is given
+    Transcript { id: Option<String> },
     /// Manage the MCP servers Anna works through
     Mcp {
         #[usage(subcommand)]
@@ -200,6 +203,8 @@ fn run(cli: Cli) -> Result<()> {
             thread::wake(&Runtime::start()?, Arc::new(Terminal::new(&conversation)), Standing::Trusted, &message)
         }
         Command::Log { follow, only } => logs::print(follow, only.as_deref()),
+        Command::Transcript { id: Some(id) } => transcripts::show(&id),
+        Command::Transcript { id: None } => transcripts::list(),
         Command::Mcp { command } => match command {
             McpCommand::Add { name, server_command } => mcp_cli::add(&name, &server_command),
             McpCommand::List => mcp_cli::list(),
