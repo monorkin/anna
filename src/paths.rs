@@ -5,15 +5,24 @@
 //! directory, which the system clears on logout.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
+/// The Claude Code config folder she works from: the login she is. Her
+/// config's to choose; failing that, whatever the shell that started her
+/// had. Everything she starts is told this explicitly, because the shell's
+/// choice would otherwise reach them and not hers.
 pub fn claude_config_home() -> PathBuf {
-    if let Some(dir) = env::var_os("CLAUDE_CONFIG_DIR") {
+    if let Some(dir) = CLAUDE_CONFIG_HOME.get() {
+        dir.clone()
+    } else if let Some(dir) = env::var_os("CLAUDE_CONFIG_DIR") {
         PathBuf::from(dir)
     } else {
         home().join(".claude")
     }
 }
+
+static CLAUDE_CONFIG_HOME: OnceLock<PathBuf> = OnceLock::new();
 
 /// Where a program lives, if it is installed.
 pub fn program(name: &str) -> Option<PathBuf> {
@@ -42,36 +51,33 @@ pub fn tools_config_home() -> PathBuf {
     config_dir().join("tools")
 }
 
-/// Points the libraries she is built on at her own folders. They read the
-/// environment, and so does everything she starts — a hook or a review that
-/// katami runs as `anna review …` has to find the same store she does.
-pub fn claim_own_state() {
-    // Before any thread exists: main calls this first
-    unsafe {
-        env::set_var("KATAMI_DATA_DIR", memory_dir());
-        env::set_var("AX_DATA_DIR", accounts_dir());
-        // So what ax tells someone to run next is a command that exists here
-        env::set_var("AX_INVOKED_AS", "anna claude");
+/// Tells the libraries she is built on where her own folders are and which
+/// login she works as. Once, first thing, in every process that is her —
+/// the hooks and reviews katami runs as `anna review …` included, so they
+/// find the same store and login she does.
+pub fn claim_own_state(claude_config_dir: Option<PathBuf>) {
+    if let Some(dir) = &claude_config_dir {
+        let _ = CLAUDE_CONFIG_HOME.set(dir.clone());
     }
+    katami::settings::configure(katami::settings::Settings {
+        data_dir: Some(memory_dir()),
+        claude_config_dir: claude_config_dir.clone(),
+    });
+    ax::settings::configure(ax::settings::Settings {
+        data_dir: Some(accounts_dir()),
+        claude_config_dir,
+        // So what ax tells someone to run next is a command that exists here
+        invoked_as: Some("anna claude".to_string()),
+    });
     keep_to_herself(&config_dir());
     keep_to_herself(&data_dir());
-}
-
-/// Which Claude login she works as, when her config names one. Set in the
-/// environment like the rest, so claude, katami and ax — and everything
-/// they start in turn — all find the same one.
-pub fn work_as(claude_config_dir: &std::path::Path) {
-    // Before any thread exists: main calls this right after claim_own_state
-    unsafe {
-        env::set_var("CLAUDE_CONFIG_DIR", claude_config_dir);
-    }
 }
 
 /// Her folders are closed to everyone else at the top, every time she
 /// starts. What is inside — logs, sessions, the database, her tools' logins —
 /// is then out of reach whatever mode a single file was made with, and an
 /// Anna set up before this was done is closed too.
-fn keep_to_herself(directory: &std::path::Path) {
+fn keep_to_herself(directory: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
     if make_private_dir(directory).is_ok() {

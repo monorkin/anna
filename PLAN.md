@@ -148,10 +148,14 @@ source:
   Jev answered 529 during a test and Anna refused everyone. When nothing can
   check a message she now says so instead of calling it an attack.
 - Her own state, in her own folder. katami's store is `config/katami` and
-  ax's is `config/ax`, through `KATAMI_DATA_DIR` and `AX_DATA_DIR`, which both
-  libraries now honour and which `main` sets before anything else — so a
-  review katami runs as `anna review …` finds the same store. Her memory is no
-  longer shared with the person's other sessions. The tools she has a profile
+  ax's is `config/ax`. Both crates take that through `settings::configure`,
+  which `main` calls first thing in every process that is her — so a review
+  katami runs as `anna review …` finds the same store. The same call names
+  the Claude login she works as (`claude_config_dir` in her config) and what
+  ax's commands are reached as (`anna claude`). The first version set
+  environment variables for this, which was reaching a crate she links
+  through the wrong door and leaked into everything she started. Her memory
+  is not shared with the person's other sessions. The tools she has a profile
   of her own in run with `XDG_CONFIG_HOME` pointed at `config/tools`, carried
   as `env` on the MCP server and the trigger, so nothing she is set up with
   lands in the person's config for that tool. All of it is in the backup; the

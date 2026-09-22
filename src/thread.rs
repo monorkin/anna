@@ -205,6 +205,7 @@ fn turn(directory: &Path, endpoint: &Endpoint, session: &Session, standing: Stan
     let mut command = Command::new(claude::binary()?);
     command
         .current_dir(directory)
+        .env("CLAUDE_CONFIG_DIR", paths::claude_config_home())
         .env("MCP_TOOL_TIMEOUT", TOOL_TIMEOUT_MILLISECONDS)
         .args(["--dangerously-skip-permissions", "--strict-mcp-config"])
         .args(["--mcp-config", &broker::mcp_config(endpoint.socket())])

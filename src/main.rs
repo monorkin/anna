@@ -151,11 +151,9 @@ enum McpCommand {
 }
 
 fn main() {
-    paths::claim_own_state();
     // A config that can't be read is the command's to complain about
-    if let Ok(config::Config { claude_config_dir: Some(directory), .. }) = config::Config::load() {
-        paths::work_as(&directory);
-    }
+    let claude_config_dir = config::Config::load().ok().and_then(|it| it.claude_config_dir);
+    paths::claim_own_state(claude_config_dir);
 
     // Rust ignores SIGPIPE, which turns `anna log | head` into a panic, so
     // the commands that print and leave get the usual behaviour back. The

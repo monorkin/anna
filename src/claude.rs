@@ -263,6 +263,7 @@ pub fn ask_haiku(prompt: &str, text: &str) -> Result<String> {
         .args(["-p", prompt, "--model", "haiku"])
         .args(["--restricted", "--tools", "Read", "--strict-mcp-config", "--disable-slash-commands"])
         .args(["--output-format", "json"])
+        .env("CLAUDE_CONFIG_DIR", paths::claude_config_home())
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -130,7 +130,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "ax"
 version = "0.1.0"
-source = "git+https://github.com/monorkin/ax.git#1687561baf86b4415322386368aa1a6d1d7d8ade"
+source = "git+https://github.com/monorkin/ax.git#01b1315e2ae5918ffb074fa94b12f047afbfc451"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1170,7 +1170,7 @@ dependencies = [
 [[package]]
 name = "katami"
 version = "0.3.0"
-source = "git+https://github.com/monorkin/katami.git#b7e745e23ff4dac7bb9918e26b4a92db7ee44d15"
+source = "git+https://github.com/monorkin/katami.git#438061f723350cabb92e65ac0f8312647544d3fc"
 dependencies = [
  "anyhow",
  "candle-core",
