@@ -38,6 +38,7 @@ anna setup
 # Running
 anna start                                # bring her up in the background (through systemd, if setup installed the service)
 anna stop                                 # stop her and everything she started
+anna restart                              # stop and start; she picks up whatever she was in the middle of
 anna status
 anna poke basecamp                        # check a source now instead of at the next tick; hook this to webhooks, mail filters, cron
 anna run                                  # or run her in this terminal until ctrl+c

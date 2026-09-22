@@ -58,6 +58,8 @@ enum Command {
     Start,
     /// Stop Anna and everything she started
     Stop,
+    /// Stop and start her again; she picks up every turn she was in the middle of
+    Restart,
     /// Show whether Anna is running and what she's listening on
     Status,
     /// Have Anna check a source now instead of at the next tick; all of them when none is named
@@ -200,6 +202,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Setup => setup::run(),
         Command::Start => lifecycle::start(),
         Command::Stop => lifecycle::stop(),
+        Command::Restart => lifecycle::restart(),
         Command::Status => lifecycle::status(),
         Command::Poke { source } => lifecycle::poke(source.as_deref()),
         Command::Run => dispatcher::run(),

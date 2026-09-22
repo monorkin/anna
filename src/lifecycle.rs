@@ -60,6 +60,13 @@ pub fn stop() -> Result<()> {
     }
 }
 
+/// Stop, then start. Nothing is lost in between: every turn that was going
+/// or waiting is kept in the store and asked again when she is back.
+pub fn restart() -> Result<()> {
+    stop()?;
+    start()
+}
+
 pub fn status() -> Result<()> {
     match control::ask(json!({ "command": "status" })) {
         Ok(answer) => {
