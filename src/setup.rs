@@ -294,7 +294,10 @@ impl Wizard<'_> {
             let hint = format!("Say yes only if that user is {agent}'s and nobody else's: everything addressed to it will wake {agent}, and {agent} will answer as it.");
             self.asking.yes(&Question { title: "Listen", question: &question, hint: &hint }, false)?
         };
-        let trusted = self.trusted_people(tool, agent, RecognizedBy::Address)?;
+        // A user that isn't an admin sees everyone else's address redacted,
+        // so what her notifications report about a sender is their id
+        let recognized_by = if its_own { RecognizedBy::PersonId } else { RecognizedBy::Address };
+        let trusted = self.trusted_people(tool, agent, recognized_by)?;
         if its_own {
             let anyone = self.anyone_may_assign_work(tool, agent)?;
             let watches = self.doing.can_watch(tool.name);
@@ -572,7 +575,7 @@ fn basecamp_notifications_source(profile: Option<&str>, account: &str, watches: 
         items: "/unreads".to_string(),
         id: Pointers::Several(words(&["/id", "/unread_at"])),
         conversation: "/readable_sgid".to_string(),
-        sender: "/creator/email_address".to_string(),
+        sender: "/creator/id".to_string(),
         sender_name: Some("/creator/name".to_string()),
         anyone,
         text: Pointers::Several(words(&["/title", "/content_excerpt", "/app_url"])),
@@ -1096,10 +1099,10 @@ mod tests {
         assert!(doing.server_env[0].is_empty(), "the profile is in the person's own command line config, where they logged it in");
         let (_, source) = &doing.sources[0];
         assert_eq!(source.watch.tool, "basecamp_account", "a user hears through notifications, the way a person does");
-        assert_eq!(source.sender, "/creator/email_address");
+        assert_eq!(source.sender, "/creator/id", "a user that isn't an admin sees addresses redacted");
         assert_eq!(source.trigger.as_ref().unwrap().args, words(&["--profile", "bot", "watch", "--json", "--account", "111"]));
         assert!(!source.anyone);
-        assert_eq!(doing.trusted, [("me@basecamp.example.com".to_string(), "Me".to_string())]);
+        assert_eq!(doing.trusted, [("1001".to_string(), "Me".to_string())], "so the trusted person is known by id");
         let _ = std::fs::remove_dir_all(config_dir);
 
         // The same, but the person's own profile picked: no listening offered
