@@ -381,7 +381,7 @@ mod tests {
             "server": "basecamp",
             "watch": { "tool": "basecamp_eventfeed", "arguments": { "action": "poll_inbox", "params": {} } },
             "items": "/items",
-            "id": "/addressing_id",
+            "id": "/event/id",
             "conversation": "/event/recording_id",
             "sender": "/event/creator_id",
             "text": ["/reason", "/event/kind", "/event/bucket_id", "/event/recording_id", "/event/details"],
@@ -398,7 +398,7 @@ mod tests {
         .to_string();
 
         let message = messages_in(&inbox, &answer).unwrap().remove(0);
-        assert_eq!(message.id, "71");
+        assert_eq!(message.id, "9001", "one event, however many reasons it reached her for");
         assert_eq!(message.sender, "1001", "people are reported by id");
         assert_eq!(message.conversation, "3");
         assert_eq!(message.text, "mentioned\n\ncomment_created\n\n2\n\n3\n\n{\"excerpt\":\"Can you look?\"}");

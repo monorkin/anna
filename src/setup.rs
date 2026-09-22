@@ -438,7 +438,7 @@ More Claude subscriptions for {agent} to rotate between:
     }
 }
 
-const BASECAMP_INBOX_NOTE: &str = "That is an item from your Basecamp inbox, not what they wrote. Its lines are, in order: why it reached you, the kind of event, the project (bucket) id, the recording id, and the event's details when it has any. Read the recording with your Basecamp tools before you do anything, and answer where it was said, with those tools.";
+const BASECAMP_INBOX_NOTE: &str = "That is an item from your Basecamp inbox, not what they wrote. Its lines are, in order: why it reached you, the kind of event, the project (bucket) id, the recording id, and the event's details when it has any. Read the recording with your Basecamp tools before you do anything. As an agent you can read most things but write only message board messages — comments, to-dos, cards and chat refuse you, and the tool then says \"insufficient scope\", which is not the reason — so answer with a new message on that project's message board, and name what you are answering.";
 
 /// How an agent hears things in Basecamp. It has no notifications — Basecamp
 /// refuses an agent everything it hasn't opened to agents, the "Hey!" menu
@@ -458,7 +458,9 @@ fn basecamp_source(profile: &str, watches: bool, anyone: bool) -> Source {
         watch: Call { tool: "basecamp_eventfeed".to_string(), arguments: json!({ "action": "poll_inbox", "params": {} }) },
         every_seconds: if watches { 900 } else { 60 },
         items: "/items".to_string(),
-        id: Pointers::One("/addressing_id".to_string()),
+        // One event reaches the agent once per reason — mentioned, and
+        // subscribed — and is one message, not two
+        id: Pointers::One("/event/id".to_string()),
         conversation: "/event/recording_id".to_string(),
         sender: "/event/creator_id".to_string(),
         sender_name: None,
