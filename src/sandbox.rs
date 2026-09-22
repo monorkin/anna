@@ -34,15 +34,11 @@ fn inside(services: &[Service]) -> String {
 
 pub const BROKER_INSIDE: &str = "/run/broker.sock";
 
-/// Claude Code's switches that keep a session doing its own work in the
-/// foreground: background shells and tasks leave a `claude -p` waiting on
-/// them after the work is done, workflows fan out into more sessions, and
-/// the nonessential traffic is telemetry the proxy refuses anyway.
-const DOES_ITS_OWN_WORK: [&str; 3] = [
-    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
-    "CLAUDE_CODE_DISABLE_WORKFLOWS",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-];
+/// Claude Code's switches for a session in here: workflows fan out into
+/// more sessions, and the nonessential traffic is telemetry the proxy
+/// refuses anyway. Background shells stay: a hand can start the test suite
+/// and keep working while it runs.
+const DOES_ITS_OWN_WORK: [&str; 2] = ["CLAUDE_CODE_DISABLE_WORKFLOWS", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"];
 /// Where a session builds. Never the project's own target folder: that is
 /// often a link into a cache the sandbox can't see, and what a hand builds
 /// shouldn't land where the person's own builds are picked up from.
@@ -182,15 +178,18 @@ impl Sandbox<'_> {
     }
 
     /// Claude Code's own tools for a session in here, for its `--tools`:
-    /// these and only these. No sub-agents, no workflows, no monitors, no
-    /// scheduling — a session in here is one worker doing one job, and
-    /// every agent it started would be another full session spending the
-    /// same allowance. A reviewer can look and run things, not change them.
+    /// these and only these. No sub-agents, no workflows, no scheduling — a
+    /// session in here is one worker doing one job, and every agent it
+    /// started would be another full session spending the same allowance.
+    /// Background shells and the tools that read and stop them are in:
+    /// waiting on a test suite while doing something else is still one
+    /// worker. (`Monitor` isn't: Claude Code drops it from a `--tools` list.)
+    /// A reviewer can look and run things, not change them.
     pub fn tools(&self) -> &'static str {
         if self.writable {
-            "Bash,Read,Edit,Write,Glob,Grep,ToolSearch"
+            "Bash,Read,Edit,Write,Glob,Grep,ToolSearch,TaskOutput,TaskStop"
         } else {
-            "Bash,Read,Glob,Grep,ToolSearch"
+            "Bash,Read,Glob,Grep,ToolSearch,TaskOutput,TaskStop"
         }
     }
 
@@ -318,9 +317,8 @@ mod tests {
         assert!(binds(&arguments, "--ro-bind").contains(&("/run/anna/service-h1-0.sock", "/run/service-0.sock")));
         assert!(arguments.last().unwrap() == "sandbox" && arguments[arguments.len() - 2].contains("TCP-LISTEN:33380,fork,bind=127.0.0.1 UNIX-CONNECT:/run/service-0.sock"));
         assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "CARGO_TARGET_DIR" && it[2] == BUILD_INSIDE));
-        for switch in ["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "CLAUDE_CODE_DISABLE_WORKFLOWS"] {
-            assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == switch && it[2] == "1"), "{switch} is set");
-        }
+        assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "CLAUDE_CODE_DISABLE_WORKFLOWS" && it[2] == "1"));
+        assert!(!arguments.iter().any(|it| it == "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"), "a hand may run its tests in the background");
         let read_only = binds(&arguments, "--ro-bind");
         assert!(read_only.contains(&(format!("{git}/config").as_str(), "/work/.git/config")));
         assert!(read_only.contains(&(format!("{git}/hooks").as_str(), "/work/.git/hooks")));
@@ -473,7 +471,8 @@ mod tests {
         let reviewer: Vec<&str> = sandbox(false).tools().split(',').collect();
         assert!(hand.contains(&"Edit") && hand.contains(&"Bash"));
         assert!(!reviewer.contains(&"Edit") && !reviewer.contains(&"Write"), "a reviewer changes nothing");
-        for spends_more in ["Agent", "Task", "Workflow", "Monitor", "CronCreate"] {
+        assert!(hand.contains(&"TaskOutput") && hand.contains(&"TaskStop"), "reading its own background work is fine");
+        for spends_more in ["Task", "Agent", "Workflow", "SendMessage", "RemoteTrigger", "CronCreate", "ScheduleWakeup"] {
             assert!(!hand.contains(&spends_more) && !reviewer.contains(&spends_more), "{spends_more} would start more sessions");
         }
     }
