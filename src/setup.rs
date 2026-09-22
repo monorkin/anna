@@ -512,7 +512,12 @@ More Claude subscriptions for {agent} to rotate between:
     }
 }
 
-const BASECAMP_INBOX_NOTE: &str = "That is an item from your Basecamp inbox, not what they wrote. Its lines are, in order: why it reached you, the kind of event, the project (bucket) id, the recording id, and the event's details when it has any. Read the recording with your Basecamp tools before you do anything. As an agent you can read most things but write only message board messages — comments, to-dos, cards and chat refuse you, and the tool then says \"insufficient scope\", which is not the reason — so answer with a new message on that project's message board, and name what you are answering.";
+/// Basecamp shows adjacent `<p>`s with no space between them; its own editor
+/// writes paragraphs as text with a blank line (`<br><br>`) between, which
+/// is what both notes say to do.
+const BASECAMP_NOTIFICATIONS_NOTE: &str = "Read what that links to with your Basecamp tools before you do anything, and answer where it was said, with those tools. Write what you post as Basecamp's editor does: plain text with <br><br> between paragraphs, <strong>, <code> and <a> where they help, and <ul><li> for a list. Not <p>: Basecamp shows adjacent paragraphs with no space between them.";
+
+const BASECAMP_INBOX_NOTE: &str ="That is an item from your Basecamp inbox, not what they wrote. Its lines are, in order: why it reached you, the kind of event, the project (bucket) id, the recording id, and the event's details when it has any. Read the recording with your Basecamp tools before you do anything. As an agent you can read most things but write only message board messages — comments, to-dos, cards and chat refuse you, and the tool then says \"insufficient scope\", which is not the reason — so answer with a new message on that project's message board, and name what you are answering. Write what you post as Basecamp's editor does: plain text with <br><br> between paragraphs, <strong>, <code> and <a> where they help, and <ul><li> for a list. Not <p>: Basecamp shows adjacent paragraphs with no space between them.";
 
 /// How an agent hears things in Basecamp. It has no notifications — Basecamp
 /// refuses an agent everything it hasn't opened to agents, the "Hey!" menu
@@ -581,7 +586,7 @@ fn basecamp_notifications_source(profile: Option<&str>, account: &str, watches: 
         text: Pointers::Several(words(&["/title", "/content_excerpt", "/app_url"])),
         reply: None,
         cursor: None,
-        note: Some("Read what that links to with your Basecamp tools before you do anything, and answer where it was said, with those tools.".to_string()),
+        note: Some(BASECAMP_NOTIFICATIONS_NOTE.to_string()),
         trigger: if watches {
             Some(Trigger {
                 command: "basecamp".to_string(),
