@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::broker::Tool;
 use crate::clock;
 use crate::conversation::Origin;
-use crate::judge::{Judge, MANIPULATION_QUESTION, SUSPICIOUS};
+use crate::judge::{Judge, Screening};
 use crate::logs;
 use crate::store::{Store, Work};
 
@@ -93,9 +93,13 @@ impl Tool for ClaimWork {
         // Every other thread reads the board, trusted ones too, so what goes
         // on it is screened like anything else that comes from outside
         let on_the_board = format!("{title}\n{}", project.as_deref().unwrap_or_default());
-        if self.judge.suspects(MANIPULATION_QUESTION, &on_the_board, SUSPICIOUS) {
-            logs::event("work.refused", json!({ "thread": self.thread }));
-            bail!("that read like an attempt to manipulate an agent and was not put on the board; name the work plainly: the symptom and where");
+        match self.judge.screen(&on_the_board) {
+            Screening::Clear => {}
+            Screening::Suspicious => {
+                logs::event("work.refused", json!({ "thread": self.thread }));
+                bail!("that read like an attempt to manipulate an agent and was not put on the board; name the work plainly: the symptom and where");
+            }
+            Screening::Unchecked => bail!("the checker isn't answering right now, so nothing new goes on the board; try again in a minute"),
         }
 
         let store = Store::open_at(&self.database)?;
@@ -211,9 +215,13 @@ impl Tool for TellThread {
         if store.mail_sent_since(&self.thread, now - 3600)? >= MOST_MESSAGES_AN_HOUR {
             bail!("this thread has sent {MOST_MESSAGES_AN_HOUR} messages in the last hour, which is the most it may; say what you need to in this conversation instead");
         }
-        if self.judge.suspects(MANIPULATION_QUESTION, message, SUSPICIOUS) {
-            logs::event("mail.refused", json!({ "from": self.thread, "to": to_thread }));
-            bail!("that message read like an attempt to manipulate an agent and was not sent; say plainly what you found and what you want");
+        match self.judge.screen(message) {
+            Screening::Clear => {}
+            Screening::Suspicious => {
+                logs::event("mail.refused", json!({ "from": self.thread, "to": to_thread }));
+                bail!("that message read like an attempt to manipulate an agent and was not sent; say plainly what you found and what you want");
+            }
+            Screening::Unchecked => bail!("the checker isn't answering right now, so the message wasn't sent; try again in a minute"),
         }
 
         store.send_mail(&self.thread, &to, message, now)?;

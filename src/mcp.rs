@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use crate::broker::Tool;
 use crate::config::{self, Config, McpServer};
 use crate::editor::Editor;
-use crate::judge::{Judge, MANIPULATION_QUESTION, SUSPICIOUS};
+use crate::judge::{Judge, Screening};
 use crate::logs;
 
 /// How long a server gets to answer. Everyone who uses a server waits in
@@ -337,11 +337,20 @@ impl Tool for Arc<Offered> {
             Ok(result) => result.clone(),
             Err(error) => format!("{error:#}"),
         };
-        if self.judge.suspects(MANIPULATION_QUESTION, &said, SUSPICIOUS) {
-            logs::event("mcp.withheld", json!({ "tool": self.name, "length": said.len(), "failed": outcome.is_err() }));
-            bail!("{}", withheld(outcome.is_err()))
+        match self.judge.screen(&said) {
+            Screening::Clear => outcome,
+            Screening::Suspicious => {
+                logs::event("mcp.withheld", json!({ "tool": self.name, "length": said.len(), "failed": outcome.is_err() }));
+                bail!("{}", withheld(outcome.is_err()))
+            }
+            // Still not read, but not called an attack either: telling her a
+            // colleague's comment was hostile because the checker was down
+            // would have her treat the thread as poisoned
+            Screening::Unchecked => {
+                logs::event("mcp.unchecked", json!({ "tool": self.name, "length": said.len() }));
+                bail!("This result couldn't be checked before you read it — the checker isn't answering right now — so it was held back. It says nothing about what was in it. Try again in a minute; if it keeps happening, say you can't read it at the moment.")
+            }
         }
-        outcome
     }
 }
 
