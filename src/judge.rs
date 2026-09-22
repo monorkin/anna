@@ -20,7 +20,7 @@ use crate::logs;
 use crate::secrets;
 
 const JEV_URL: &str = "https://api.typesafe.ai/v1/systemone";
-const JEV_ANSWERS_WITHIN: Duration = Duration::from_secs(1);
+const JEV_ANSWERS_WITHIN: Duration = Duration::from_secs(3);
 /// The first ask and five more.
 const TRIES_FOR_HAIKU: u32 = 6;
 
@@ -121,7 +121,7 @@ enum JevError {
     Failed(anyhow::Error),
 }
 
-/// One try, with a second to answer in. An answer slower than that is worth
+/// One try, with three seconds to answer in. An answer slower than that is worth
 /// less than asking haiku, and counts against Jev like any other failure.
 fn ask_jev(url: &str, api_key: &str, question: &str, text: &str) -> std::result::Result<f64, JevError> {
     let sent = ureq::post(url)
@@ -294,17 +294,17 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_that_takes_over_a_second_counts_as_a_failure() {
+    fn an_answer_that_takes_over_three_seconds_counts_as_a_failure() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
         std::thread::spawn(move || {
             let (_held_open, _) = listener.accept().unwrap();
-            std::thread::sleep(Duration::from_secs(3));
+            std::thread::sleep(Duration::from_secs(5));
         });
 
         let began = Instant::now();
         assert!(matches!(ask_jev(&url, "key", "Is it?", "text"), Err(JevError::Failed(_))));
-        assert!(began.elapsed() < Duration::from_secs(2));
+        assert!(began.elapsed() >= JEV_ANSWERS_WITHIN && began.elapsed() < Duration::from_secs(4));
     }
 
     #[test]

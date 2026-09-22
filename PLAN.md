@@ -172,7 +172,8 @@ source:
   lands in the person's config for that tool. All of it is in the backup; the
   accounts only when tokens are. Still shared: the Claude login itself. ax
   rotates the default `~/.claude` login, so her rotation moves the person's.
-- A circuit breaker on Jev. A call gets one second; slower than that, or an
+- A circuit breaker on Jev. A call gets three seconds (one at first, which
+  40 KB Basecamp listings didn't fit in); slower than that, or an
   error, is a failure. Five in ten minutes and Jev is left alone for thirty.
   A refused key switches it off until she restarts. Haiku answers meanwhile.
   This replaced the retry-with-backoff from the day before. Setup's "does this
