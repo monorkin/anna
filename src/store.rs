@@ -16,7 +16,7 @@ use std::path::Path;
 
 use crate::conversation::Origin;
 
-const MIGRATIONS: [&str; 2] = ["
+const MIGRATIONS: [&str; 3] = ["
     CREATE TABLE schedules (
         id INTEGER PRIMARY KEY,
         source TEXT NOT NULL,
@@ -50,7 +50,26 @@ const MIGRATIONS: [&str; 2] = ["
     );
 ", "
     ALTER TABLE schedules ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0;
+", "
+    CREATE TABLE turns (
+        id INTEGER PRIMARY KEY,
+        source TEXT NOT NULL,
+        conversation TEXT NOT NULL,
+        trusted INTEGER NOT NULL,
+        said TEXT NOT NULL,
+        queued TEXT NOT NULL
+    );
 "];
+
+/// A turn that was asked for and not yet finished: what a stopped Anna
+/// picks up again when she starts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingTurn {
+    pub id: i64,
+    pub origin: Origin,
+    pub trusted: bool,
+    pub said: String,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Schedule {
@@ -196,6 +215,37 @@ impl Store {
         Ok(schedules)
     }
 
+    /// Written when a turn is queued and taken out when it is over, so what
+    /// was still to do survives a stop, a crash, or a limit that was hit.
+    pub fn keep_turn(&self, origin: &Origin, trusted: bool, said: &str, now: &str) -> Result<i64> {
+        self.connection.execute(
+            "INSERT INTO turns (source, conversation, trusted, said, queued) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![origin.source, origin.conversation, trusted, said, now],
+        )?;
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    pub fn forget_turn(&self, id: i64) -> Result<()> {
+        self.connection.execute("DELETE FROM turns WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// In the order they were asked for, which is the order they run in.
+    pub fn turns_left(&self) -> Result<Vec<PendingTurn>> {
+        let mut statement = self.connection.prepare("SELECT id, source, conversation, trusted, said FROM turns ORDER BY id")?;
+        let turns = statement
+            .query_map([], |row| {
+                Ok(PendingTurn {
+                    id: row.get(0)?,
+                    origin: Origin { source: row.get(1)?, conversation: row.get(2)? },
+                    trusted: row.get(3)?,
+                    said: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(turns)
+    }
+
     /// One line per conversation: claiming again replaces what was claimed.
     pub fn claim_work(&self, origin: &Origin, thread: &str, title: &str, project: Option<&str>, now: &str) -> Result<()> {
         self.connection.execute(
@@ -299,6 +349,24 @@ mod tests {
 
     fn origin(conversation: &str) -> Origin {
         Origin { source: "basecamp".to_string(), conversation: conversation.to_string() }
+    }
+
+    #[test]
+    fn turns_are_kept_until_they_are_over_in_the_order_they_came() {
+        let (store, directory) = store("turns");
+
+        let first = store.keep_turn(&origin("card-1"), true, "fix the login", "2026-09-22T09:00:00Z").unwrap();
+        let second = store.keep_turn(&origin("card-2"), false, "look at the cookie", "2026-09-22T09:00:01Z").unwrap();
+        let left = store.turns_left().unwrap();
+        assert_eq!(left.iter().map(|it| it.said.as_str()).collect::<Vec<_>>(), ["fix the login", "look at the cookie"]);
+        assert!(left[0].trusted && !left[1].trusted);
+        assert_eq!(left[1].origin, origin("card-2"));
+
+        store.forget_turn(first).unwrap();
+        assert_eq!(store.turns_left().unwrap().iter().map(|it| it.id).collect::<Vec<_>>(), [second]);
+        store.forget_turn(second).unwrap();
+        assert!(store.turns_left().unwrap().is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -284,6 +284,24 @@ pub fn ask_haiku(prompt: &str, text: &str) -> Result<String> {
     Ok(reply.result)
 }
 
+/// `claude auth login` in her own folder, at this terminal: the one time
+/// a person is needed. Nothing of the person's own Claude folder is read.
+pub fn log_in() -> Result<()> {
+    let home = paths::claude_config_home();
+    paths::make_private_dir(&home)?;
+    let status = Command::new(binary()?)
+        .args(["auth", "login"])
+        .env("CLAUDE_CONFIG_DIR", &home)
+        .status()
+        .context("could not run claude")?;
+    if !status.success() {
+        bail!("claude didn't finish logging in");
+    }
+    println!("{}", login());
+    println!("`anna claude account add --alias <name>` keeps this login in her rotation.");
+    Ok(())
+}
+
 /// Who she is to Claude right now, for `anna status`: the login in the
 /// config folder she works from, which is the allowance she is spending.
 pub fn login() -> String {

@@ -151,11 +151,22 @@ source:
   ax's is `config/ax`. Both crates take that through `settings::configure`,
   which `main` calls first thing in every process that is her — so a review
   katami runs as `anna review …` finds the same store. The same call names
-  the Claude login she works as (`claude_config_dir` in her config) and what
-  ax's commands are reached as (`anna claude`). The first version set
-  environment variables for this, which was reaching a crate she links
-  through the wrong door and leaked into everything she started. Her memory
-  is not shared with the person's other sessions. The tools she has a profile
+  her Claude folder, `config/claude`, and what ax's commands are reached as
+  (`anna claude`). Her Claude login lives in that folder and nowhere else:
+  `anna claude login` logs it in, `anna claude account add` keeps the login
+  in her own rotation, `anna claude switch` puts another stored one in
+  place, `anna claude whoami` says which. The first version set environment
+  variables for the paths, which was reaching a crate she links through the
+  wrong door and leaked into everything she started; the second pointed her
+  at a folder inside the person's own ax store, which tied her to it. Her
+  memory and her login are not shared with the person's other sessions.
+- Stopping her loses nothing. Every turn is written to the store when it is
+  queued and taken out when it is over, so what was waiting, or in the
+  middle of running, when she was stopped — or crashed, or hit a limit — is
+  asked again when she starts, in order. A thread resumes its own session,
+  so it remembers what it was doing, and is told it was stopped, since a
+  hand it had going is gone. `anna claude account add` and `switch` need
+  her stopped; now that costs nothing. The tools she has a profile
   of her own in run with `XDG_CONFIG_HOME` pointed at `config/tools`, carried
   as `env` on the MCP server and the trigger, so nothing she is set up with
   lands in the person's config for that tool. All of it is in the backup; the

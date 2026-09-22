@@ -6,23 +6,16 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
-/// The Claude Code config folder she works from: the login she is. Her
-/// config's to choose; failing that, whatever the shell that started her
-/// had. Everything she starts is told this explicitly, because the shell's
-/// choice would otherwise reach them and not hers.
+/// The Claude Code config folder she works from: the login she is. Hers,
+/// under her config, and never the person's or the shell's: `anna claude
+/// login` logs into it, `anna claude account add` keeps what is logged in
+/// there, and `anna claude switch` puts another stored account in its
+/// place — the same as ax does for a person, in a store of her own.
+/// Everything she starts is told this folder explicitly.
 pub fn claude_config_home() -> PathBuf {
-    if let Some(dir) = CLAUDE_CONFIG_HOME.get() {
-        dir.clone()
-    } else if let Some(dir) = env::var_os("CLAUDE_CONFIG_DIR") {
-        PathBuf::from(dir)
-    } else {
-        home().join(".claude")
-    }
+    config_dir().join("claude")
 }
-
-static CLAUDE_CONFIG_HOME: OnceLock<PathBuf> = OnceLock::new();
 
 /// Where a program lives, if it is installed.
 pub fn program(name: &str) -> Option<PathBuf> {
@@ -55,17 +48,14 @@ pub fn tools_config_home() -> PathBuf {
 /// login she works as. Once, first thing, in every process that is her —
 /// the hooks and reviews katami runs as `anna review …` included, so they
 /// find the same store and login she does.
-pub fn claim_own_state(claude_config_dir: Option<PathBuf>) {
-    if let Some(dir) = &claude_config_dir {
-        let _ = CLAUDE_CONFIG_HOME.set(dir.clone());
-    }
+pub fn claim_own_state() {
     katami::settings::configure(katami::settings::Settings {
         data_dir: Some(memory_dir()),
-        claude_config_dir: claude_config_dir.clone(),
+        claude_config_dir: Some(claude_config_home()),
     });
     ax::settings::configure(ax::settings::Settings {
         data_dir: Some(accounts_dir()),
-        claude_config_dir,
+        claude_config_dir: Some(claude_config_home()),
         // So what ax tells someone to run next is a command that exists here
         invoked_as: Some("anna claude".to_string()),
     });

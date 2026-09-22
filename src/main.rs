@@ -128,11 +128,20 @@ enum SourceCommand {
 
 #[derive(Subcommands)]
 enum ClaudeCommand {
+    /// Log Anna's own Claude folder in, in the browser; then `account add` keeps that login
+    Login,
     /// Manage the accounts in the rotation
     Account {
         #[usage(subcommand)]
         command: ax::cli::AccountCommand,
     },
+    /// Make a stored account the one Anna works as
+    Switch {
+        /// Account number, email, or alias
+        account: String,
+    },
+    /// Who Anna is logged in as right now
+    Whoami,
 }
 
 #[derive(Subcommands)]
@@ -157,9 +166,7 @@ enum McpCommand {
 }
 
 fn main() {
-    // A config that can't be read is the command's to complain about
-    let claude_config_dir = config::Config::load().ok().and_then(|it| it.claude_config_dir);
-    paths::claim_own_state(claude_config_dir);
+    paths::claim_own_state();
 
     // Rust ignores SIGPIPE, which turns `anna log | head` into a panic, so
     // the commands that print and leave get the usual behaviour back. The
@@ -218,9 +225,17 @@ fn run(cli: Cli) -> Result<()> {
             command: katami::cli::Command::Memory { command },
         }),
         Command::Claude { command } => match command {
+            ClaudeCommand::Login => claude::log_in(),
             ClaudeCommand::Account { command } => ax::cli::run(ax::cli::Cli {
                 command: ax::cli::Command::Account { command },
             }),
+            ClaudeCommand::Switch { account } => ax::cli::run(ax::cli::Cli {
+                command: ax::cli::Command::Switch { account },
+            }),
+            ClaudeCommand::Whoami => {
+                println!("{}", claude::login());
+                Ok(())
+            }
         },
     }
 }

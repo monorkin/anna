@@ -123,6 +123,9 @@ pub fn run() -> Result<()> {
         rotate_accounts();
     }
 
+    if let Err(error) = pick_up_where_she_left_off(&runtime, &turns) {
+        logs::event("turns.not_resumed", json!({ "error": format!("{error:#}") }));
+    }
     logs::event("anna.listening", json!({ "sources": runtime.config.sources.keys().collect::<Vec<_>>() }));
     loop {
         os_thread::park();
@@ -372,9 +375,22 @@ fn heard_as(people: &BTreeMap<String, String>, source: &Source, message: &Messag
 
 /// Wakes the conversation's thread on a thread of its own, after whatever
 /// turn that conversation already has running.
+/// Every turn is written down before it is queued and taken out once it is
+/// over, so stopping Anna — or her crashing — loses nothing: what was
+/// waiting and what was in the middle of running are still there when she
+/// starts, and are asked again.
 fn wake_in_turn(runtime: &Arc<Runtime>, turns: &Arc<Turns>, conversation: Arc<dyn Conversation>, standing: Standing, said: String) {
     let runtime = runtime.clone();
     let key = conversation.key().to_string();
+    let kept = Store::open_at(&runtime.database)
+        .and_then(|store| store.keep_turn(&conversation.origin(), standing == Standing::Trusted, &said, &clock::timestamp()));
+    let kept = match kept {
+        Ok(id) => Some(id),
+        Err(error) => {
+            logs::event("turn.not_kept", json!({ "conversation": key, "error": format!("{error:#}") }));
+            None
+        }
+    };
 
     turns.add(
         &key,
@@ -383,8 +399,34 @@ fn wake_in_turn(runtime: &Arc<Runtime>, turns: &Arc<Turns>, conversation: Arc<dy
                 logs::event("thread.failed", json!({ "conversation": conversation.key(), "error": format!("{error:#}") }));
                 let _ = conversation.say("Something broke on my side before I could finish this. I've logged it; ask me again and I'll pick it back up.");
             }
+            if let Some(id) = kept {
+                let _ = Store::open_at(&runtime.database).and_then(|store| store.forget_turn(id));
+            }
         }),
     );
+}
+
+/// The turns a stopped Anna never finished, asked again in the order they
+/// came. A thread resumes its own session, so it remembers what it was in
+/// the middle of; it is told it was stopped, since a hand it had going is
+/// gone and the project may be half-changed.
+fn pick_up_where_she_left_off(runtime: &Arc<Runtime>, turns: &Arc<Turns>) -> Result<()> {
+    let store = Store::open_at(&runtime.database)?;
+    for turn in store.turns_left()? {
+        store.forget_turn(turn.id)?;
+        let Some(conversation) = conversation_at(runtime, &turn.origin) else {
+            logs::event("turn.orphaned", json!({ "source": turn.origin.source }));
+            continue;
+        };
+        logs::event("turn.resumed", json!({ "conversation": conversation.key() }));
+        let standing = if turn.trusted { Standing::Trusted } else { Standing::CanAssignWork };
+        let said = format!(
+            "You were stopped in the middle of this and have just been started again. Any hand you had going is gone — its changes to the project folder are still there, its session is not — so look at where things stand before you go on, and pick up from there. What you were asked:\n\n{}",
+            turn.said
+        );
+        wake_in_turn(runtime, turns, conversation, standing, said);
+    }
+    Ok(())
 }
 
 /// A subscription that is used up is a wait, not a failure: what she was
