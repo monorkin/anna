@@ -8,7 +8,7 @@ pub const TERMINAL: &str = "terminal";
 
 /// Where a conversation lives: enough to find it again later, when a
 /// schedule comes due or another thread has something to tell it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Origin {
     pub source: String,
     pub conversation: String,

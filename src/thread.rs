@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crate::broker::{self, Endpoint, Tool};
 use crate::claude::{self, OutOfTime};
@@ -110,7 +111,8 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
     let mut command = turn(&directory, &endpoint, &session, standing, &role)?;
     memory.cover(&mut command);
 
-    let mut outcome = claude::reply_of(&mut command, &message, runtime.outside.time_limit, None);
+    let time_limit = Duration::from_secs(runtime.config.minutes_per_thread_turn * 60);
+    let mut outcome = claude::reply_of(&mut command, &message, time_limit, None);
     if session.begun && outcome.as_ref().is_err_and(|error| claude::says_the_session_is_gone(error)) {
         // Claude's folder no longer has the session — it moved, or was
         // cleaned out — so the conversation starts over, and says so
@@ -119,7 +121,7 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
         message = format!("{message}\n\n(Your earlier session in this conversation is gone, so you are starting from here without its history.)");
         let mut again = turn(&directory, &endpoint, &session, standing, &role)?;
         memory.cover(&mut again);
-        outcome = claude::reply_of(&mut again, &message, runtime.outside.time_limit, None);
+        outcome = claude::reply_of(&mut again, &message, time_limit, None);
     }
     memory.finish();
     hands.discard_all();

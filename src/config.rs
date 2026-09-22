@@ -40,14 +40,23 @@ pub struct Config {
     /// Set to false when something else already runs `ax auto-switch`.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub rotate_accounts: bool,
-    /// How long one run of a thread, a hand or a reviewer may take before it
-    /// is stopped. The only hard stop Anna has.
+    /// How long one run of a hand or a reviewer may take before it is
+    /// stopped.
     #[serde(default = "an_hour")]
     pub minutes_per_run: u64,
+    /// How long one turn of a thread may take. Longer than a hand's: a
+    /// thread spends most of a turn waiting on its hands and their reviews,
+    /// and cut off at a hand's limit it would take the hand at work with it.
+    #[serde(default = "three_hours")]
+    pub minutes_per_thread_turn: u64,
 }
 
 fn an_hour() -> u64 {
     60
+}
+
+fn three_hours() -> u64 {
+    3 * an_hour()
 }
 
 fn anna() -> String {
@@ -72,6 +81,7 @@ impl Default for Config {
             jev_url: None,
             rotate_accounts: true,
             minutes_per_run: an_hour(),
+            minutes_per_thread_turn: three_hours(),
         }
     }
 }

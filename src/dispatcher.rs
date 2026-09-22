@@ -13,7 +13,7 @@
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -34,7 +34,7 @@ use crate::paths;
 use crate::runtime::Runtime;
 use crate::schedule_tools;
 use crate::source::{self, Message, Position, Seen, Sourced};
-use crate::store::Store;
+use crate::store::{PendingTurn, Store};
 use crate::thread;
 
 const SWITCH_AT_PERCENT: f64 = 90.0;
@@ -423,7 +423,8 @@ fn wake_in_turn(runtime: &Arc<Runtime>, turns: &Arc<Turns>, conversation: Arc<dy
 /// gone and the project may be half-changed.
 fn pick_up_where_she_left_off(runtime: &Arc<Runtime>, turns: &Arc<Turns>) -> Result<()> {
     let store = Store::open_at(&runtime.database)?;
-    for turn in store.turns_left()? {
+    let left = store.turns_left()?;
+    for (turn, said) in left.iter().zip(as_picked_up(&left)) {
         store.forget_turn(turn.id)?;
         let Some(conversation) = conversation_at(runtime, &turn.origin) else {
             logs::event("turn.orphaned", json!({ "source": turn.origin.source }));
@@ -431,13 +432,29 @@ fn pick_up_where_she_left_off(runtime: &Arc<Runtime>, turns: &Arc<Turns>) -> Res
         };
         logs::event("turn.resumed", json!({ "conversation": conversation.key() }));
         let standing = if turn.trusted { Standing::Trusted } else { Standing::CanAssignWork };
-        let said = format!(
-            "You were stopped in the middle of this and have just been started again. Any hand you had going is gone — its changes to the project folder are still there, its session is not — so look at where things stand before you go on, and pick up from there. What you were asked:\n\n{}",
-            turn.said
-        );
         wake_in_turn(runtime, turns, conversation, standing, said);
     }
     Ok(())
+}
+
+const STOPPED_IN_THE_MIDDLE: &str = "You were stopped in the middle of this and have just been started again. Any hand you had going is gone — its changes to the project folder are still there, its session is not — so look at where things stand before you go on, and pick up from there. What you were asked:\n\n";
+
+/// What each kept turn is asked again with. Turns run one at a time per
+/// conversation, so only a conversation's first was running when she was
+/// stopped; the ones after it were waiting and are asked as they were. A
+/// turn already told it was stopped isn't told twice.
+fn as_picked_up(left: &[PendingTurn]) -> Vec<String> {
+    let mut running = HashSet::new();
+    left.iter()
+        .map(|turn| {
+            let first_of_its_conversation = running.insert(&turn.origin);
+            if first_of_its_conversation && !turn.said.starts_with(STOPPED_IN_THE_MIDDLE) {
+                format!("{STOPPED_IN_THE_MIDDLE}{}", turn.said)
+            } else {
+                turn.said.clone()
+            }
+        })
+        .collect()
 }
 
 /// A subscription that is used up is a wait, not a failure: what she was
@@ -591,6 +608,31 @@ mod tests {
         until(|| turns.busy_conversations() == 0);
         assert_eq!(*ran.lock().unwrap(), ["card-1: do it", "card-1: never mind", "card-1: actually, do"]);
         assert_eq!(turns.busy_conversations(), 0);
+    }
+
+    #[test]
+    fn after_a_restart_only_the_turn_that_was_running_is_told_it_was_stopped() {
+        let turn = |id: i64, conversation: &str, said: &str| PendingTurn {
+            id,
+            origin: Origin { source: "basecamp".to_string(), conversation: conversation.to_string() },
+            trusted: true,
+            said: said.to_string(),
+        };
+        let left = [
+            turn(1, "card-1", "add metrics"),
+            turn(2, "card-1", "the other thread says it touches config.rs"),
+            turn(3, "card-2", "rename the env vars"),
+            turn(4, "card-1", &format!("{STOPPED_IN_THE_MIDDLE}older")),
+        ];
+
+        let said = as_picked_up(&left);
+        assert_eq!(said[0], format!("{STOPPED_IN_THE_MIDDLE}add metrics"));
+        assert_eq!(said[1], "the other thread says it touches config.rs", "it was waiting, not running");
+        assert_eq!(said[2], format!("{STOPPED_IN_THE_MIDDLE}rename the env vars"), "every conversation's first");
+        assert_eq!(said[3], format!("{STOPPED_IN_THE_MIDDLE}older"), "never told twice");
+
+        let again = [turn(5, "card-1", &format!("{STOPPED_IN_THE_MIDDLE}add metrics"))];
+        assert_eq!(as_picked_up(&again)[0], format!("{STOPPED_IN_THE_MIDDLE}add metrics"), "a second restart doesn't stack it");
     }
 
     #[test]
