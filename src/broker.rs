@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Instant;
 
 use crate::logs;
 use crate::paths;
@@ -46,6 +47,9 @@ impl Endpoint {
             .with_context(|| format!("could not listen on {}", socket.display()))?;
         let tools = Arc::new(tools);
         let closed = Arc::new(AtomicBool::new(false));
+        // The socket is named for the session it serves — thread-<key>,
+        // hand-<id> — which is who a call in the log belongs to
+        let who: Arc<str> = Arc::from(socket.file_stem().unwrap_or_default().to_string_lossy().as_ref());
 
         let closed_for_listening = closed.clone();
         thread::spawn(move || {
@@ -55,8 +59,9 @@ impl Endpoint {
                 }
                 let tools = Arc::clone(&tools);
                 let closed = closed_for_listening.clone();
+                let who = who.clone();
                 thread::spawn(move || {
-                    let _ = serve(session, &tools, &closed);
+                    let _ = serve(session, &tools, &closed, &who);
                 });
             }
         });
@@ -95,7 +100,7 @@ impl Drop for Endpoint {
     }
 }
 
-fn serve(session: UnixStream, tools: &[Box<dyn Tool>], closed: &AtomicBool) -> Result<()> {
+fn serve(session: UnixStream, tools: &[Box<dyn Tool>], closed: &AtomicBool, who: &str) -> Result<()> {
     let mut writer = session.try_clone()?;
     for line in BufReader::new(session).lines() {
         let line = line?;
@@ -106,14 +111,14 @@ fn serve(session: UnixStream, tools: &[Box<dyn Tool>], closed: &AtomicBool) -> R
             continue;
         }
         let message: Value = serde_json::from_str(&line)?;
-        if let Some(response) = respond(&message, tools) {
+        if let Some(response) = respond(&message, tools, who) {
             writeln!(writer, "{response}")?;
         }
     }
     Ok(())
 }
 
-fn respond(message: &Value, tools: &[Box<dyn Tool>]) -> Option<Value> {
+fn respond(message: &Value, tools: &[Box<dyn Tool>], who: &str) -> Option<Value> {
     let id = message.get("id")?.clone();
     let method = message["method"].as_str().unwrap_or_default();
 
@@ -125,7 +130,7 @@ fn respond(message: &Value, tools: &[Box<dyn Tool>]) -> Option<Value> {
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools.iter().map(|it| listing(it.as_ref())).collect::<Vec<_>>() })),
-        "tools/call" => Ok(call(&message["params"], tools)),
+        "tools/call" => Ok(call(&message["params"], tools, who)),
         _ => Err(json!({ "code": -32601, "message": format!("unknown method {method}") })),
     };
 
@@ -143,18 +148,24 @@ fn listing(tool: &dyn Tool) -> Value {
     })
 }
 
-fn call(params: &Value, tools: &[Box<dyn Tool>]) -> Value {
+fn call(params: &Value, tools: &[Box<dyn Tool>], who: &str) -> Value {
     let name = params["name"].as_str().unwrap_or_default();
-    logs::event("broker.called", json!({ "tool": name }));
-
+    let began = Instant::now();
     let outcome = match tools.iter().find(|it| it.name() == name) {
         Some(tool) => tool.call(&params["arguments"]),
         None => Err(anyhow::anyhow!("there is no tool called {name} here")),
     };
+    let took = began.elapsed().as_millis();
 
     match outcome {
-        Ok(text) => json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
-        Err(error) => json!({ "content": [{ "type": "text", "text": format!("{error:#}") }], "isError": true }),
+        Ok(text) => {
+            logs::event("broker.called", json!({ "by": who, "tool": name, "ms": took }));
+            json!({ "content": [{ "type": "text", "text": text }], "isError": false })
+        }
+        Err(error) => {
+            logs::event("broker.refused", json!({ "by": who, "tool": name, "ms": took, "error": format!("{error:#}") }));
+            json!({ "content": [{ "type": "text", "text": format!("{error:#}") }], "isError": true })
+        }
     }
 }
 

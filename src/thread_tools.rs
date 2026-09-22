@@ -189,7 +189,7 @@ impl Workshop {
         let started = &self.hands.started;
         let outcome = hand
             .work(ask, &self.outside, started)
-            .and_then(|report| reviewer::review(hand.project(), &hand.asked(), &report, &self.outside, started));
+            .and_then(|report| reviewer::review(&id, hand.project(), &hand.asked(), &report, &self.outside, started));
 
         match outcome {
             Ok(_) if started.is_over() => {

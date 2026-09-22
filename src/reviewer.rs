@@ -29,8 +29,9 @@ pub struct Verdict {
     pub notes: String,
 }
 
-pub fn review(project: &Path, brief: &str, report: &str, outside: &Outside, started: &Started) -> Result<Verdict> {
+pub fn review(hand: &str, project: &Path, brief: &str, report: &str, outside: &Outside, started: &Started) -> Result<Verdict> {
     let directory = paths::sessions_dir().join(format!("r{:x}", clock::nanos()));
+    logs::event("review.started", json!({ "hand": hand, "project": project }));
     claude::write_hand_profile(&directory.join("profile"))?;
 
     let sandbox = Sandbox {
@@ -47,7 +48,7 @@ pub fn review(project: &Path, brief: &str, report: &str, outside: &Outside, star
     let _ = fs::remove_dir_all(&directory);
 
     let verdict = verdict_in(&outcome?.result)?;
-    logs::event("review.finished", json!({ "project": project, "accepted": verdict.accepted }));
+    logs::event("review.finished", json!({ "hand": hand, "accepted": verdict.accepted }));
     Ok(verdict)
 }
 

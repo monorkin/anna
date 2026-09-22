@@ -91,6 +91,9 @@ enum Command {
         /// Keep printing as things happen
         #[usage(short = 'f', long)]
         follow: bool,
+        /// Only the lines of one thread, hand or conversation; any part of its id
+        #[usage(long)]
+        only: Option<String>,
     },
     /// Manage the MCP servers Anna works through
     Mcp {
@@ -196,7 +199,7 @@ fn run(cli: Cli) -> Result<()> {
             // Whoever is at this terminal can already do anything Anna can
             thread::wake(&Runtime::start()?, Arc::new(Terminal::new(&conversation)), Standing::Trusted, &message)
         }
-        Command::Log { follow } => logs::print(follow),
+        Command::Log { follow, only } => logs::print(follow, only.as_deref()),
         Command::Mcp { command } => match command {
             McpCommand::Add { name, server_command } => mcp_cli::add(&name, &server_command),
             McpCommand::List => mcp_cli::list(),
