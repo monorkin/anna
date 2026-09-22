@@ -8,8 +8,10 @@ use crate::config::{Config, McpServer};
 use crate::control;
 use crate::mcp::{self, Server};
 
-pub fn add(name: &str, command: &[String]) -> Result<()> {
-    register(name, command, BTreeMap::new())?;
+pub fn add(name: &str, command: &[String], trusted_only: bool) -> Result<()> {
+    let mut settings = settings_for(command)?;
+    settings.trusted_only = trusted_only;
+    register(name, settings)?;
     println!("Added {name}.");
     list_one(name, &Config::load()?.mcp_servers[name])?;
     say_if_she_has_to_restart();
@@ -24,24 +26,23 @@ fn say_if_she_has_to_restart() {
     }
 }
 
-/// Adding without a word, for setup, which has its own way of saying things.
-pub fn register(name: &str, command: &[String], env: BTreeMap<String, String>) -> Result<()> {
-    register_with_prose(name, command, env, BTreeMap::new())
-}
-
-/// `prose` is what setup already knows carries text for people on this
-/// server — a tool name to its arguments, an argument being a name or a
-/// JSON pointer into a gateway tool's params.
-pub fn register_with_prose(name: &str, command: &[String], env: BTreeMap<String, String>, prose: BTreeMap<String, Vec<String>>) -> Result<()> {
+/// A server started by `command`, and nothing else said about it yet.
+pub fn settings_for(command: &[String]) -> Result<McpServer> {
     let (program, args) = command.split_first().context("give the command that starts the server after --")?;
-    let mut settings = McpServer {
+    Ok(McpServer {
         command: program.clone(),
         args: args.to_vec(),
-        env,
-        prose,
+        env: BTreeMap::new(),
+        prose: BTreeMap::new(),
         fingerprint: None,
-    };
+        trusted_only: false,
+    })
+}
 
+/// Adding without a word, for setup, which has its own way of saying
+/// things. What was marked as prose on a server of the same name stays
+/// marked, and so does its environment when none is given.
+pub fn register(name: &str, mut settings: McpServer) -> Result<()> {
     let mut config = Config::load()?;
     if let Some(existing) = config.mcp_servers.get(name) {
         for (tool, arguments) in &existing.prose {

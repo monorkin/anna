@@ -97,9 +97,17 @@ trait Doing {
     /// connected under `profile`.
     fn connect_agent(&mut self, tool: &str, profile: &str, agent: &str) -> Result<()>;
     fn can_watch(&mut self, tool: &str) -> bool;
-    fn add_server(&mut self, name: &str, command: &[String], env: BTreeMap<String, String>) -> Result<()>;
+    fn add_server(&mut self, name: &str, command: &[String], env: BTreeMap<String, String>, acts_as: ActsAs) -> Result<()>;
     fn add_source(&mut self, name: &str, source: Source) -> Result<()>;
     fn trust(&mut self, address: &str, name: &str) -> Result<()>;
+}
+
+/// Whose name a server's tools act in. One that acts as the person is only
+/// offered to turns on a trusted person's word.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ActsAs {
+    Agent,
+    Person,
 }
 
 /// What a source reports its senders as, which is what `people` has to be
@@ -279,21 +287,23 @@ impl Wizard<'_> {
             return Ok(());
         };
 
-        let mut command = vec![tool.program.to_string()];
-        if let Some(profile) = &profile {
-            command.extend(words(&["--profile", profile]));
-        }
-        command.extend(words(&["mcp", "--account", &account.id]));
-        if let Err(error) = self.doing.add_server(tool.name, &command, BTreeMap::new()) {
-            return self.asking.trouble(&format!("Couldn't add the {} server: {error:#}", tool.title));
-        }
-        self.asking.done(&format!("{agent} can use {} as {who}.", tool.title))?;
-
         let its_own = !yours && {
             let question = format!("Is {who} {agent}'s own user, so it should listen there?");
             let hint = format!("Say yes only if that user is {agent}'s and nobody else's: everything addressed to it will wake {agent}, and {agent} will answer as it.");
             self.asking.yes(&Question { title: "Listen", question: &question, hint: &hint }, false)?
         };
+
+        let mut command = vec![tool.program.to_string()];
+        if let Some(profile) = &profile {
+            command.extend(words(&["--profile", profile]));
+        }
+        command.extend(words(&["mcp", "--account", &account.id]));
+        // A user that isn't hers acts in someone else's name
+        let acts_as = if its_own { ActsAs::Agent } else { ActsAs::Person };
+        if let Err(error) = self.doing.add_server(tool.name, &command, BTreeMap::new(), acts_as) {
+            return self.asking.trouble(&format!("Couldn't add the {} server: {error:#}", tool.title));
+        }
+        self.asking.done(&format!("{agent} can use {} as {who}.", tool.title))?;
         // A user that isn't an admin sees everyone else's address redacted,
         // so what her notifications report about a sender is their id
         let recognized_by = if its_own { RecognizedBy::PersonId } else { RecognizedBy::Address };
@@ -359,7 +369,7 @@ impl Wizard<'_> {
 
         let watches = self.doing.can_watch(tool.name);
         let command = words(&[tool.program, "--profile", &profile, "mcp"]);
-        if let Err(error) = self.doing.add_server(tool.name, &command, own_tool_config()) {
+        if let Err(error) = self.doing.add_server(tool.name, &command, own_tool_config(), ActsAs::Agent) {
             return self.asking.trouble(&format!("Couldn't add the {} server: {error:#}", tool.title));
         }
 
@@ -400,7 +410,7 @@ impl Wizard<'_> {
             },
             _ => words(&[tool.program, "mcp"]),
         };
-        if let Err(error) = self.doing.add_server(tool.name, &command, BTreeMap::new()) {
+        if let Err(error) = self.doing.add_server(tool.name, &command, BTreeMap::new(), ActsAs::Person) {
             return self.asking.trouble(&format!("Couldn't add the {} server: {error:#}", tool.title));
         }
         self.asking.done(&format!("{agent} can use {} as {who}.", tool.title))?;
@@ -804,8 +814,12 @@ impl Doing for Machine {
             .is_ok_and(|it| it.success())
     }
 
-    fn add_server(&mut self, name: &str, command: &[String], env: BTreeMap<String, String>) -> Result<()> {
-        mcp_cli::register_with_prose(name, command, env, prose_of(name))
+    fn add_server(&mut self, name: &str, command: &[String], env: BTreeMap<String, String>, acts_as: ActsAs) -> Result<()> {
+        let mut settings = mcp_cli::settings_for(command)?;
+        settings.env = env;
+        settings.prose = prose_of(name);
+        settings.trusted_only = acts_as == ActsAs::Person;
+        mcp_cli::register(name, settings)
     }
 
     fn add_source(&mut self, name: &str, source: Source) -> Result<()> {
@@ -909,6 +923,7 @@ mod tests {
         connected: Vec<String>,
         servers: Vec<(String, Vec<String>)>,
         server_env: Vec<BTreeMap<String, String>>,
+        acts_as: Vec<ActsAs>,
         trusted: Vec<(String, String)>,
         sources: Vec<(String, Source)>,
         watches: bool,
@@ -999,9 +1014,10 @@ mod tests {
             self.watches
         }
 
-        fn add_server(&mut self, name: &str, command: &[String], env: BTreeMap<String, String>) -> Result<()> {
+        fn add_server(&mut self, name: &str, command: &[String], env: BTreeMap<String, String>, acts_as: ActsAs) -> Result<()> {
             self.servers.push((name.to_string(), command.to_vec()));
             self.server_env.push(env);
+            self.acts_as.push(acts_as);
             Ok(())
         }
 
@@ -1050,6 +1066,7 @@ mod tests {
         assert_eq!(doing.connected, ["basecamp botten Botten"], "the profile is named after the agent");
         assert!(!asking.asked.iter().any(|it| it.contains("secret")), "connecting is the command line's, and setup never asks for a secret");
         assert_eq!(doing.servers[0], ("basecamp".to_string(), words(&["basecamp", "--profile", "botten", "mcp"])));
+        assert_eq!(doing.acts_as, [ActsAs::Agent, ActsAs::Person], "the agent acts as itself; HEY used as you acts as you");
         assert_eq!(doing.server_env[0]["XDG_CONFIG_HOME"], "{tools}", "her Basecamp profile lives in her own folder, wherever that is");
         assert_eq!(source_env(&doing), "{tools}");
         assert!(config::environment(&doing.server_env[0])["XDG_CONFIG_HOME"].ends_with("/anna/tools"));
@@ -1118,6 +1135,7 @@ mod tests {
         assert!(asking.asked.iter().any(|it| it == "Confirm: Do you want to allow Anna to use Basecamp as bot@basecamp.example.com?"));
         assert_eq!(doing.servers, [("basecamp".to_string(), words(&["basecamp", "--profile", "bot", "mcp", "--account", "111"]))]);
         assert!(doing.server_env[0].is_empty(), "the profile is in the person's own command line config, where they logged it in");
+        assert_eq!(doing.acts_as, [ActsAs::Agent], "her own user acts as her");
         let (_, source) = &doing.sources[0];
         assert_eq!(source.watch.tool, "basecamp_account", "a user hears through notifications, the way a person does");
         assert_eq!(source.sender, "/creator/id", "a user that isn't an admin sees addresses redacted");
@@ -1131,6 +1149,7 @@ mod tests {
         let mut doing = Pretend { installed: vec!["basecamp"], profiles: vec!["personal", "bot"], ..Pretend::default() };
         let config_dir = walk(&mut asking, &mut doing, "own-profile");
         assert_eq!(doing.servers[0].1, words(&["basecamp", "--profile", "personal", "mcp", "--account", "111"]));
+        assert_eq!(doing.acts_as, [ActsAs::Person], "the person's own profile is only for turns on a trusted word");
         assert!(doing.sources.is_empty());
         assert!(!asking.asked.iter().any(|it| it.starts_with("Listen:")));
         let _ = std::fs::remove_dir_all(config_dir);

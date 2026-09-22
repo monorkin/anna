@@ -11,6 +11,7 @@ mod dispatcher;
 mod editor;
 mod fsutil;
 mod hand;
+mod held;
 mod judge;
 mod lifecycle;
 mod logs;
@@ -151,6 +152,9 @@ enum McpCommand {
     /// Add a server, or accept the changed tools of one already added
     Add {
         name: String,
+        /// The server acts as you, not as Anna: only turns on a trusted person's word get it
+        #[usage(long)]
+        as_me: bool,
         /// The command that starts the server
         #[usage(double_dash = "required")]
         server_command: Vec<String>,
@@ -216,7 +220,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Transcript { id: Some(id) } => transcripts::show(&id),
         Command::Transcript { id: None } => transcripts::list(),
         Command::Mcp { command } => match command {
-            McpCommand::Add { name, server_command } => mcp_cli::add(&name, &server_command),
+            McpCommand::Add { name, as_me, server_command } => mcp_cli::add(&name, &server_command, as_me),
             McpCommand::List => mcp_cli::list(),
             McpCommand::Remove { name } => mcp_cli::remove(&name),
             McpCommand::Prose { name, tool, argument } => mcp_cli::mark_prose(&name, &tool, &argument),

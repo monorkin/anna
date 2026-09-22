@@ -22,6 +22,7 @@ use crate::proxy::{self, Proxy};
 use crate::sandbox::Outside;
 use crate::store::Store;
 use crate::toolchains::Toolchains;
+use crate::held::HeldBack;
 
 pub struct Runtime {
     pub config: Config,
@@ -34,6 +35,8 @@ pub struct Runtime {
     pub judge: Arc<Judge>,
     pub editor: Arc<Editor>,
     pub catalog: Arc<Catalog>,
+    /// What couldn't be checked yet, waiting to be read with read_held_back.
+    pub held: Arc<HeldBack>,
     pub outside: Arc<Outside>,
     _proxy: Proxy,
 }
@@ -48,7 +51,8 @@ impl Runtime {
         let style = config::style()?;
         let editor = Arc::new(Editor::new(style.clone(), judge.clone()));
         let personality = config::personality()?;
-        let catalog = Arc::new(Catalog::open(&config, editor.clone(), judge.clone()));
+        let held = Arc::new(HeldBack::default());
+        let catalog = Arc::new(Catalog::open(&config, editor.clone(), judge.clone(), held.clone()));
         let proxy = Proxy::start(&paths::socket("proxy"), &[proxy::CLAUDE_API])?;
         let outside = Arc::new(Outside {
             proxy_socket: proxy.socket().to_path_buf(),
@@ -71,6 +75,7 @@ impl Runtime {
             judge,
             editor,
             catalog,
+            held,
             outside,
             _proxy: proxy,
         })

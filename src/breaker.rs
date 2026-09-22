@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-const FAILURES_THAT_OPEN_IT: usize = 5;
+pub const FAILURES_THAT_OPEN_IT: usize = 5;
 const WITHIN: Duration = Duration::from_secs(10 * 60);
 const STAYS_OPEN_FOR: Duration = Duration::from_secs(30 * 60);
 

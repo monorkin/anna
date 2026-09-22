@@ -301,6 +301,33 @@ Still open from the review:
   out until she is restarted. The proxy and broker take any number of
   connections.
 
+### The judge, after it blocked her own project (2026-09-22)
+
+Jev timed out on 40 KB comment listings, haiku answered in a code fence,
+the parse failed, and every read was withheld as "an attempt to manipulate
+you". Codex reviewed the fix (`reviews/2026-09-22-codex-judge.md`). Now:
+
+- A trusted person's message isn't screened; everything she reads while
+  working on it still is, since a listing holds other people's words.
+- Haiku's answer is the score alone, bare or in one closed fence. Anything
+  else is asked for again, up to five more times, with a nudge that never
+  quotes the bad reply back.
+- Jev gets three seconds. A text over 8 KB that times out falls back to
+  haiku without counting against Jev, so big listings can't switch it off
+  for everything else; a short one still counts.
+- Couldn't-check is never called an attack. What couldn't be checked is
+  kept for an hour and read with `read_held_back` once it passes, so a tool
+  isn't called again — a posted comment isn't posted twice — and a hand
+  isn't sent back to redo work for a review.
+- A server that acts as the person (setup's "as you", or `anna mcp add
+  --as-me`) is offered, and grantable, only to turns on a trusted word.
+- A lent login counts only from the message that woke her. The quota note
+  comes from the harness when it saw the limit.
+
+Still open: splitting a big result and screening its parts; permission to
+use a lent login kept by the harness rather than read from prose;
+adversarial tests of haiku as a judge.
+
 ## Decided
 
 - Anna is her own project, built on top of katami (memory) and ax (Claude

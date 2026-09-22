@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::broker::{self, Endpoint, Tool};
 use crate::claude::{self, OutOfTime};
 use crate::conversation::{Conversation, Standing};
+use crate::held::ReadHeldBack;
 use crate::logs;
 use crate::paths;
 use crate::runtime::Runtime;
@@ -75,14 +76,16 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
         hands: hands.clone(),
         judge: runtime.judge.clone(),
         outside: runtime.outside.clone(),
+        held: runtime.held.clone(),
     });
     let spoke = Arc::new(AtomicBool::new(false));
 
     let answered_otherwise = conversation.answered_otherwise();
     let mut tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(StartHand { workshop: workshop.clone(), catalog: runtime.catalog.clone() }),
+        Box::new(StartHand { workshop: workshop.clone(), catalog: runtime.catalog.clone(), standing }),
         Box::new(SendBack { workshop }),
         Box::new(Dismiss { hands: hands.clone() }),
+        Box::new(ReadHeldBack { held: runtime.held.clone(), judge: runtime.judge.clone() }),
     ];
     if answered_otherwise.is_none() {
         tools.push(Box::new(Reply {
@@ -92,7 +95,7 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
         }));
     }
     tools.extend(tools_for_later_and_for_others(runtime, conversation.as_ref(), standing));
-    tools.extend(runtime.catalog.all());
+    tools.extend(runtime.catalog.for_standing(standing));
     let endpoint = Endpoint::open(&paths::socket(&format!("thread-{key}")), tools)?;
 
     logs::event("thread.woken", json!({ "conversation": key }));

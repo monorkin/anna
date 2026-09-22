@@ -204,6 +204,10 @@ pub struct McpServer {
     /// What the server's tool listing looked like when it was added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// The server acts as the person Anna works for, not as her: only a
+    /// turn on a trusted person's word gets its tools.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trusted_only: bool,
 }
 
 impl Config {
@@ -271,6 +275,7 @@ mod tests {
                 env: BTreeMap::from([("XDG_CONFIG_HOME".to_string(), "/home/someone/.config/anna/tools".to_string())]),
                 prose: BTreeMap::from([("create_comment".to_string(), vec!["content".to_string()])]),
                 fingerprint: Some("00000000deadbeef".to_string()),
+                trusted_only: true,
             },
         );
         config.save_to(&path).unwrap();

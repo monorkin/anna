@@ -22,7 +22,9 @@ use std::time::{Duration, Instant};
 
 use crate::broker::Tool;
 use crate::config::{self, Config, McpServer};
+use crate::conversation::Standing;
 use crate::editor::Editor;
+use crate::held::HeldBack;
 use crate::judge::{Judge, Screening};
 use crate::logs;
 
@@ -202,13 +204,16 @@ struct Offered {
     /// a server added today has no prose marked yet, and without this every
     /// one of its tools — posting ones too — could be handed to a hand.
     only_reads: bool,
+    /// The server acts as the person Anna works for, not as her.
+    trusted_only: bool,
     server: Arc<Mutex<Server>>,
     editor: Arc<Editor>,
     judge: Arc<Judge>,
+    held: Arc<HeldBack>,
 }
 
 impl Catalog {
-    pub fn open(config: &Config, editor: Arc<Editor>, judge: Arc<Judge>) -> Catalog {
+    pub fn open(config: &Config, editor: Arc<Editor>, judge: Arc<Judge>, held: Arc<HeldBack>) -> Catalog {
         let mut tools = Vec::new();
         let mut servers = BTreeMap::new();
 
@@ -225,10 +230,12 @@ impl Catalog {
                             input_schema: tool["inputSchema"].clone(),
                             prose_arguments: settings.prose.get(&remote_name).cloned().unwrap_or_default(),
                             only_reads: tool["annotations"]["readOnlyHint"].as_bool().unwrap_or(false),
+                            trusted_only: settings.trusted_only,
                             remote_name,
                             server: server.clone(),
                             editor: editor.clone(),
                             judge: judge.clone(),
+                            held: held.clone(),
                         }));
                     }
                 }
@@ -253,24 +260,34 @@ impl Catalog {
             .call(tool, arguments)
     }
 
-    pub fn all(&self) -> Vec<Box<dyn Tool>> {
-        self.tools.iter().map(|it| Box::new(it.clone()) as Box<dyn Tool>).collect()
+    /// What a thread is offered. A turn on the word of someone who isn't
+    /// trusted doesn't get the tools of a server that acts as the person
+    /// Anna works for: they could otherwise have her do things in that
+    /// person's name.
+    pub fn for_standing(&self, standing: Standing) -> Vec<Box<dyn Tool>> {
+        self.tools
+            .iter()
+            .filter(|it| standing == Standing::Trusted || !it.trusted_only)
+            .map(|it| Box::new(it.clone()) as Box<dyn Tool>)
+            .collect()
     }
 
     /// The tools a hand may be granted. Tools that carry prose for people are
     /// never among them: a hand reports to its thread, and the thread speaks.
-    pub fn grant(&self, names: &[String]) -> Result<Vec<Box<dyn Tool>>> {
-        names.iter().map(|name| self.grantable(name)).collect()
+    pub fn grant(&self, names: &[String], standing: Standing) -> Result<Vec<Box<dyn Tool>>> {
+        names.iter().map(|name| self.grantable(name, standing)).collect()
     }
 
-    fn grantable(&self, name: &str) -> Result<Box<dyn Tool>> {
+    fn grantable(&self, name: &str, standing: Standing) -> Result<Box<dyn Tool>> {
         let tool = self
             .tools
             .iter()
             .find(|it| it.name == name)
             .with_context(|| format!("there is no tool called {name} to grant"))?;
 
-        if !tool.prose_arguments.is_empty() {
+        if tool.trusted_only && standing != Standing::Trusted {
+            bail!("there is no tool called {name} to grant")
+        } else if !tool.prose_arguments.is_empty() {
             bail!("{name} speaks to people, and hands don't. Have the hand report to you and say it yourself.")
         } else if !tool.only_reads {
             bail!("{name} can change things out there, and its server doesn't say otherwise, so a hand can't have it. Have the hand report to you and use {name} yourself.")
@@ -347,8 +364,9 @@ impl Tool for Arc<Offered> {
             // colleague's comment was hostile because the check didn't run
             // would have her treat the thread as poisoned
             Screening::Unchecked => {
-                logs::event("mcp.unchecked", json!({ "tool": self.name, "length": said.len(), "failed": outcome.is_err(), "only_reads": self.only_reads }));
-                bail!("{}", unchecked(self.only_reads, outcome.is_ok()))
+                let held = self.held.keep(said.clone());
+                logs::event("mcp.unchecked", json!({ "tool": self.name, "length": said.len(), "failed": outcome.is_err(), "only_reads": self.only_reads, "held": held }));
+                bail!("{}", unchecked(self.only_reads, outcome.is_ok(), &held))
             }
         }
     }
@@ -372,15 +390,17 @@ fn with_prose_polished(arguments: &Value, marked: &[String], polish: impl Fn(&st
 }
 
 /// The call ran before its answer was screened, so what she is told depends
-/// on what the call did: asking again is only safe for one that only reads.
-/// One that writes and went through would be done twice.
-fn unchecked(only_reads: bool, went_through: bool) -> &'static str {
+/// on what the call did — one that writes and went through would be done
+/// twice if she called it again — and the answer is kept for her to read
+/// once it can be checked, without calling anything again.
+fn unchecked(only_reads: bool, went_through: bool, held: &str) -> String {
+    let reading = format!("read_held_back with id {held} in a minute gives it to you once it can be checked");
     if only_reads {
-        "This result couldn't be checked before you read it, so it was held back. That says nothing about what was in it. Asking again in a minute is safe; if it keeps happening, say you can't read it at the moment."
+        format!("This result couldn't be checked before you read it, so it was held back; that says nothing about what was in it. {reading}.")
     } else if went_through {
-        "That went through: the server accepted it. Only its answer was held back, because it couldn't be checked before you read it. Don't do it again."
+        format!("That went through: the server accepted it. Don't do it again. Only its answer was held back, because it couldn't be checked before you read it; {reading}.")
     } else {
-        "That failed, and the reason couldn't be checked before you read it, so it was held back. It may or may not have taken effect: look before you try it again."
+        format!("That failed, and the reason couldn't be checked before you read it, so it was held back; {reading}. It may or may not have taken effect: look before you try it again.")
     }
 }
 
@@ -419,6 +439,7 @@ done
             env: BTreeMap::new(),
             prose: BTreeMap::new(),
             fingerprint: None,
+            trusted_only: false,
         }
     }
 
@@ -479,9 +500,11 @@ done
                 input_schema: json!({}),
                 prose_arguments: Vec::new(),
                 only_reads: remote_name == "shout",
+                trusted_only: false,
                 server: Arc::new(Mutex::new(Server::start(&fake_server()).unwrap())),
                 editor: Arc::new(Editor::new(None, judge.clone())),
                 judge: judge.clone(),
+                held: Arc::new(HeldBack::default()),
             })
         };
 
@@ -496,18 +519,20 @@ done
     }
 
     #[test]
-    fn an_answer_that_couldnt_be_checked_never_has_her_repeat_a_write() {
-        assert!(unchecked(true, true).contains("Asking again in a minute is safe"));
-        assert!(unchecked(false, true).contains("Don't do it again"), "a comment that was posted would be posted twice");
-        assert!(unchecked(false, false).contains("look before you try it again"));
-        assert!(!unchecked(false, true).contains("manipulate") && !unchecked(true, true).contains("manipulate"));
+    fn an_answer_that_couldnt_be_checked_is_kept_and_never_has_her_repeat_a_write() {
+        let wrote = unchecked(false, true, "0a1b2c3d4e5f6071");
+        assert!(wrote.contains("Don't do it again"), "a comment that was posted would be posted twice");
+        assert!(wrote.contains("read_held_back with id 0a1b2c3d4e5f6071"), "its answer is read from what was kept, not by calling again");
+        assert!(unchecked(false, false, "x").contains("look before you try it again"));
+        assert!(unchecked(true, true, "x").contains("read_held_back with id x"));
+        assert!(!wrote.contains("manipulate") && !unchecked(true, true, "x").contains("manipulate"));
     }
 
     #[test]
     fn a_hand_is_only_granted_what_its_server_says_only_reads() {
         let judge = Arc::new(Judge::Haiku);
         let server = Arc::new(Mutex::new(Server::start(&fake_server()).unwrap()));
-        let offered = |name: &str, only_reads: bool, prose_arguments: Vec<String>| {
+        let offered = |name: &str, only_reads: bool, prose_arguments: Vec<String>, trusted_only: bool| {
             Arc::new(Offered {
                 name: name.to_string(),
                 remote_name: name.to_string(),
@@ -515,25 +540,35 @@ done
                 input_schema: json!({}),
                 prose_arguments,
                 only_reads,
+                trusted_only,
                 server: server.clone(),
                 editor: Arc::new(Editor::new(None, judge.clone())),
                 judge: judge.clone(),
+                held: Arc::new(HeldBack::default()),
             })
         };
         let catalog = Catalog {
             tools: vec![
-                offered("mail_search", true, Vec::new()),
-                offered("mail_threads", false, Vec::new()),
-                offered("mail_digest", true, vec!["body".to_string()]),
+                offered("mail_search", true, Vec::new(), false),
+                offered("mail_threads", false, Vec::new(), false),
+                offered("mail_digest", true, vec!["body".to_string()], false),
+                offered("my_inbox", true, Vec::new(), true),
             ],
             servers: BTreeMap::new(),
         };
 
-        assert_eq!(catalog.grant(&["mail_search".to_string()]).unwrap().len(), 1);
-        let writes = catalog.grant(&["mail_threads".to_string()]).err().unwrap().to_string();
+        let trusted = Standing::Trusted;
+        assert_eq!(catalog.grant(&["mail_search".to_string()], trusted).unwrap().len(), 1);
+        let writes = catalog.grant(&["mail_threads".to_string()], trusted).err().unwrap().to_string();
         assert!(writes.contains("can change things out there"), "a server added today has no prose marked, and still can't post through a hand");
-        assert!(catalog.grant(&["mail_digest".to_string()]).err().unwrap().to_string().contains("speaks to people"));
-        assert_eq!(catalog.all().len(), 3, "the thread itself still gets everything");
+        assert!(catalog.grant(&["mail_digest".to_string()], trusted).err().unwrap().to_string().contains("speaks to people"));
+        assert_eq!(catalog.for_standing(trusted).len(), 4, "the thread itself still gets everything");
+
+        // A server that acts as the person: never for a turn on an untrusted word
+        assert_eq!(catalog.grant(&["my_inbox".to_string()], trusted).unwrap().len(), 1);
+        assert!(catalog.grant(&["my_inbox".to_string()], Standing::CanAssignWork).is_err());
+        let offered_to_anyone: Vec<String> = catalog.for_standing(Standing::CanAssignWork).iter().map(|it| it.name().to_string()).collect();
+        assert_eq!(offered_to_anyone, ["mail_search", "mail_threads", "mail_digest"]);
     }
 
     #[test]

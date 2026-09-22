@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::config::{self, Config};
 use crate::editor::Editor;
 use crate::judge::Judge;
+use crate::held::HeldBack;
 use crate::mcp::Catalog;
 use crate::source::{self, Position};
 
@@ -24,7 +25,7 @@ pub fn check(name: &str) -> Result<()> {
 
     let judge = Arc::new(Judge::Haiku);
     let editor = Arc::new(Editor::new(config::style()?, judge.clone()));
-    let catalog = Catalog::open(&config, editor, judge);
+    let catalog = Catalog::open(&config, editor, judge, Arc::new(HeldBack::default()));
 
     // Read from where she has got to, and the position left where it is
     let arguments = match Position::of(name, source) {
