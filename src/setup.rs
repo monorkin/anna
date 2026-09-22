@@ -62,6 +62,11 @@ const TOOLS: [Tool; 3] = [
 ];
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Profile {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Account {
     pub id: String,
     pub name: String,
@@ -79,6 +84,10 @@ trait Doing {
     fn install_service(&mut self, agent: &str) -> Result<()>;
     /// Who the tool's command line is logged in as, for the confirm question.
     fn logged_in_as(&mut self, tool: &str) -> Vec<String>;
+    /// The profiles the tool's command line has, when it has profiles.
+    fn profiles(&mut self, tool: &str) -> Vec<Profile>;
+    /// Who one profile is logged in as.
+    fn identity_of(&mut self, tool: &str, profile: Option<&str>) -> Option<String>;
     /// The ids the tool knows someone by, in every account the person
     /// running setup can see. Empty when it knows nobody by that address.
     fn person_ids(&mut self, tool: &str, address: &str) -> Vec<String>;
@@ -234,8 +243,66 @@ impl Wizard<'_> {
 
         if tool.can_be_its_own_agent && self.wants_an_agent_profile(tool, agent)? {
             self.as_an_agent(tool, agent)
+        } else if tool.name == "basecamp" {
+            self.as_a_profile(tool, agent)
         } else {
             self.as_you(tool, agent)
+        }
+    }
+
+    /// Basecamp through one of the command line's profiles: the person
+    /// picks which, and the command line has already done the logging in.
+    /// A profile that is the person's own gets the agent the tools and no
+    /// ears. One made for the agent — a user of its own in Basecamp — is
+    /// the agent's, and then it listens there, the way a person would.
+    fn as_a_profile(&mut self, tool: &Tool, agent: &str) -> Result<()> {
+        let profiles = self.doing.profiles(tool.name);
+        let profile = match profiles.len() {
+            0 => None,
+            1 => Some(profiles[0].name.clone()),
+            _ => {
+                let names: Vec<String> = profiles.iter().map(|it| it.name.clone()).collect();
+                let hint = format!("The profiles your {} command line is logged in to. To give {agent} a user of its own, log a profile in as that user first: {} profile create <name>, then {} auth login -P <name>.", tool.program, tool.program, tool.program);
+                let question = Question { title: "Profile", question: "Which profile should it use?", hint: &hint };
+                Some(names[self.asking.choice(&question, &names)?].clone())
+            }
+        };
+
+        let who = self.doing.identity_of(tool.name, profile.as_deref()).unwrap_or_else(|| format!("your {} login", tool.title));
+        let yours = self.doing.logged_in_as(tool.name).contains(&who);
+        let question = format!("Do you want to allow {agent} to use {} as {who}?", tool.title);
+        let hint = format!("{agent} will be able to perform all actions as if it was {who}.");
+        if !self.asking.yes(&Question { title: "Confirm", question: &question, hint: &hint }, false)? {
+            return self.asking.done(&format!("{agent} stays out of {}.", tool.title));
+        }
+        let Some(account) = self.pick_account(tool, profile.as_deref())? else {
+            return Ok(());
+        };
+
+        let mut command = vec![tool.program.to_string()];
+        if let Some(profile) = &profile {
+            command.extend(words(&["--profile", profile]));
+        }
+        command.extend(words(&["mcp", "--account", &account.id]));
+        if let Err(error) = self.doing.add_server(tool.name, &command, BTreeMap::new()) {
+            return self.asking.trouble(&format!("Couldn't add the {} server: {error:#}", tool.title));
+        }
+        self.asking.done(&format!("{agent} can use {} as {who}.", tool.title))?;
+
+        let its_own = !yours && {
+            let question = format!("Is {who} {agent}'s own user, so it should listen there?");
+            let hint = format!("Say yes only if that user is {agent}'s and nobody else's: everything addressed to it will wake {agent}, and {agent} will answer as it.");
+            self.asking.yes(&Question { title: "Listen", question: &question, hint: &hint }, false)?
+        };
+        let trusted = self.trusted_people(tool, agent, RecognizedBy::Address)?;
+        if its_own {
+            let anyone = self.anyone_may_assign_work(tool, agent)?;
+            let watches = self.doing.can_watch(tool.name);
+            self.doing.add_source(tool.name, basecamp_notifications_source(profile.as_deref(), &account.id, watches, anyone))?;
+            self.asking.done(&format!("{agent} listens in {} as {who}.", tool.title))?;
+            self.say_who_is_heard(tool, agent, trusted, anyone)
+        } else {
+            self.asking.note(&format!("  {agent} gets the tools only and won't listen there, or it would answer your colleagues in your name."))
         }
     }
 
@@ -298,12 +365,16 @@ impl Wizard<'_> {
         self.doing.add_source(tool.name, basecamp_source(&profile, watches, anyone))?;
 
         self.asking.done(&format!("{agent} is in {} under its own profile.", tool.title))?;
+        self.say_who_is_heard(tool, agent, trusted, anyone)
+    }
+
+    fn say_who_is_heard(&mut self, tool: &Tool, agent: &str, trusted: usize, anyone: bool) -> Result<()> {
         match (trusted, anyone) {
             (0, false) => self.asking.trouble(&format!("Nobody is trusted and nobody else may assign work, so {agent} won't act on anything in {}. Run setup again to change that.", tool.title))?,
             (_, false) => self.asking.done(&format!("{agent} acts only on the people you named, and ignores everyone else."))?,
             (_, true) => self.asking.done(&format!("Anyone who can reach {agent} there can hand it work; only the people you named can direct it."))?,
         }
-        if watches {
+        if self.doing.can_watch(tool.name) {
             self.asking.done(&format!("{agent} hears about mentions and assignments the moment they happen."))
         } else {
             self.asking.note(&format!("  This basecamp has no `watch` command yet, so {agent} checks for mentions once a minute."))
@@ -481,6 +552,45 @@ fn basecamp_source(profile: &str, watches: bool, anyone: bool) -> Source {
     }
 }
 
+/// How a user of the agent's own hears things in Basecamp: its
+/// notifications, the "Hey!" menu, worked out against the real thing. The
+/// same notification is bumped for every new comment, so what makes one
+/// new is its id and when it went unread; the body is an excerpt, so the
+/// thread gets the title, the excerpt and the link to read the rest; and
+/// there is no single call that answers, so the thread answers with
+/// Basecamp's own tools. The profile lives in the person's own command
+/// line config, where they logged it in, so nothing is pointed elsewhere.
+fn basecamp_notifications_source(profile: Option<&str>, account: &str, watches: bool, anyone: bool) -> Source {
+    let mut through = Vec::new();
+    if let Some(profile) = profile {
+        through.extend(words(&["--profile", profile]));
+    }
+    Source {
+        server: "basecamp".to_string(),
+        watch: Call { tool: "basecamp_account".to_string(), arguments: json!({ "action": "get_my_notifications" }) },
+        every_seconds: if watches { 900 } else { 60 },
+        items: "/unreads".to_string(),
+        id: Pointers::Several(words(&["/id", "/unread_at"])),
+        conversation: "/readable_sgid".to_string(),
+        sender: "/creator/email_address".to_string(),
+        sender_name: Some("/creator/name".to_string()),
+        anyone,
+        text: Pointers::Several(words(&["/title", "/content_excerpt", "/app_url"])),
+        reply: None,
+        cursor: None,
+        note: Some("Read what that links to with your Basecamp tools before you do anything, and answer where it was said, with those tools.".to_string()),
+        trigger: if watches {
+            Some(Trigger {
+                command: "basecamp".to_string(),
+                args: [through, words(&["watch", "--json", "--account", account])].concat(),
+                env: BTreeMap::new(),
+            })
+        } else {
+            None
+        },
+    }
+}
+
 /// The environment a tool runs in when the agent has a profile of its own
 /// there: its config lives in the agent's folder, not the person's.
 fn own_tool_config() -> BTreeMap<String, String> {
@@ -544,6 +654,25 @@ impl Doing for Machine {
 
     fn install_service(&mut self, agent: &str) -> Result<()> {
         service::install(agent, true)
+    }
+
+    fn profiles(&mut self, tool: &str) -> Vec<Profile> {
+        json_from(tool, &["profile", "list", "--json"])
+            .and_then(|listed| listed["data"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter(|it| it["authenticated"].as_bool().unwrap_or(false))
+            .filter_map(|it| it["name"].as_str().map(|name| Profile { name: name.to_string() }))
+            .collect()
+    }
+
+    fn identity_of(&mut self, tool: &str, profile: Option<&str>) -> Option<String> {
+        let mut arguments = Vec::new();
+        if let Some(profile) = profile {
+            arguments.extend(["--profile", profile]);
+        }
+        arguments.extend(["me", "--json"]);
+        json_from(tool, &arguments)?["data"]["identity"]["email_address"].as_str().map(String::from)
     }
 
     fn logged_in_as(&mut self, tool: &str) -> Vec<String> {
@@ -759,6 +888,7 @@ mod tests {
         trusted: Vec<(String, String)>,
         sources: Vec<(String, Source)>,
         watches: bool,
+        profiles: Vec<&'static str>,
     }
 
     impl Doing for Pretend {
@@ -799,6 +929,17 @@ mod tests {
 
         fn logged_in_as(&mut self, tool: &str) -> Vec<String> {
             vec![format!("me@{tool}.example.com")]
+        }
+
+        fn profiles(&mut self, _tool: &str) -> Vec<Profile> {
+            self.profiles.iter().map(|it| Profile { name: it.to_string() }).collect()
+        }
+
+        fn identity_of(&mut self, tool: &str, profile: Option<&str>) -> Option<String> {
+            match profile {
+                Some("bot") => Some("bot@basecamp.example.com".to_string()),
+                _ => Some(format!("me@{tool}.example.com")),
+            }
         }
 
         fn person_ids(&mut self, _tool: &str, address: &str) -> Vec<String> {
@@ -938,7 +1079,36 @@ mod tests {
         assert_eq!(doing.servers, [("basecamp".to_string(), words(&["basecamp", "mcp", "--account", "111"]))]);
         assert!(doing.sources.is_empty());
         assert!(doing.connected.is_empty());
+        assert!(!asking.asked.iter().any(|it| it.starts_with("Profile:") || it.starts_with("Listen:")), "one profile, and it is the person's: nothing to pick, nothing to listen as");
         assert_eq!(doing.trusted, [("me@basecamp.example.com".to_string(), "Me".to_string())], "enter trusts whoever runs setup");
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[test]
+    fn a_profile_logged_in_as_her_own_user_is_hers_to_listen_with() {
+        // Basecamp, not as an agent, the second profile, confirm, the first account, listen: yes, trust me, my name, nobody else, anyone may assign: no
+        let mut asking = Scripted::answering(&["", "", "", "", "", "y", "n", "2", "y", "1", "y", "y", "", "", "n"]);
+        let mut doing = Pretend { installed: vec!["basecamp"], profiles: vec!["personal", "bot"], watches: true, ..Pretend::default() };
+        let config_dir = walk(&mut asking, &mut doing, "own-user");
+
+        assert!(asking.asked.iter().any(|it| it == "Confirm: Do you want to allow Anna to use Basecamp as bot@basecamp.example.com?"));
+        assert_eq!(doing.servers, [("basecamp".to_string(), words(&["basecamp", "--profile", "bot", "mcp", "--account", "111"]))]);
+        assert!(doing.server_env[0].is_empty(), "the profile is in the person's own command line config, where they logged it in");
+        let (_, source) = &doing.sources[0];
+        assert_eq!(source.watch.tool, "basecamp_account", "a user hears through notifications, the way a person does");
+        assert_eq!(source.sender, "/creator/email_address");
+        assert_eq!(source.trigger.as_ref().unwrap().args, words(&["--profile", "bot", "watch", "--json", "--account", "111"]));
+        assert!(!source.anyone);
+        assert_eq!(doing.trusted, [("me@basecamp.example.com".to_string(), "Me".to_string())]);
+        let _ = std::fs::remove_dir_all(config_dir);
+
+        // The same, but the person's own profile picked: no listening offered
+        let mut asking = Scripted::answering(&["", "", "", "", "", "y", "n", "1", "y", "1", "y", ""]);
+        let mut doing = Pretend { installed: vec!["basecamp"], profiles: vec!["personal", "bot"], ..Pretend::default() };
+        let config_dir = walk(&mut asking, &mut doing, "own-profile");
+        assert_eq!(doing.servers[0].1, words(&["basecamp", "--profile", "personal", "mcp", "--account", "111"]));
+        assert!(doing.sources.is_empty());
+        assert!(!asking.asked.iter().any(|it| it.starts_with("Listen:")));
         let _ = std::fs::remove_dir_all(config_dir);
     }
 
