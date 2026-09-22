@@ -33,6 +33,16 @@ fn inside(services: &[Service]) -> String {
 }
 
 pub const BROKER_INSIDE: &str = "/run/broker.sock";
+
+/// Claude Code's switches that keep a session doing its own work in the
+/// foreground: background shells and tasks leave a `claude -p` waiting on
+/// them after the work is done, workflows fan out into more sessions, and
+/// the nonessential traffic is telemetry the proxy refuses anyway.
+const DOES_ITS_OWN_WORK: [&str; 3] = [
+    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+    "CLAUDE_CODE_DISABLE_WORKFLOWS",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+];
 /// Where a session builds. Never the project's own target folder: that is
 /// often a link into a cache the sandbox can't see, and what a hand builds
 /// shouldn't land where the person's own builds are picked up from.
@@ -166,8 +176,22 @@ impl Sandbox<'_> {
             .args(["--setenv", "CARGO_TARGET_DIR", BUILD_INSIDE])
             .args(["--setenv", "CARGO_HOME", CARGO_INSIDE])
             .args(["--setenv", "CARGO_NET_OFFLINE", "true"])
+            .args(DOES_ITS_OWN_WORK.iter().flat_map(|name| ["--setenv", name, "1"]))
             .args(["/usr/bin/bash", "-c", &inside(&self.services), "sandbox"]);
         command
+    }
+
+    /// Claude Code's own tools for a session in here, for its `--tools`:
+    /// these and only these. No sub-agents, no workflows, no monitors, no
+    /// scheduling — a session in here is one worker doing one job, and
+    /// every agent it started would be another full session spending the
+    /// same allowance. A reviewer can look and run things, not change them.
+    pub fn tools(&self) -> &'static str {
+        if self.writable {
+            "Bash,Read,Edit,Write,Glob,Grep,ToolSearch"
+        } else {
+            "Bash,Read,Glob,Grep,ToolSearch"
+        }
     }
 
     /// mise's installs read-only, and Rust: the toolchain read-only, and
@@ -294,6 +318,9 @@ mod tests {
         assert!(binds(&arguments, "--ro-bind").contains(&("/run/anna/service-h1-0.sock", "/run/service-0.sock")));
         assert!(arguments.last().unwrap() == "sandbox" && arguments[arguments.len() - 2].contains("TCP-LISTEN:33380,fork,bind=127.0.0.1 UNIX-CONNECT:/run/service-0.sock"));
         assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "CARGO_TARGET_DIR" && it[2] == BUILD_INSIDE));
+        for switch in ["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "CLAUDE_CODE_DISABLE_WORKFLOWS"] {
+            assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == switch && it[2] == "1"), "{switch} is set");
+        }
         let read_only = binds(&arguments, "--ro-bind");
         assert!(read_only.contains(&(format!("{git}/config").as_str(), "/work/.git/config")));
         assert!(read_only.contains(&(format!("{git}/hooks").as_str(), "/work/.git/hooks")));
@@ -422,6 +449,33 @@ mod tests {
         assert!(!said.contains("LEAKED"));
         assert!(root.join("build/debug").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_session_in_the_sandbox_gets_its_own_tools_and_no_agents_of_its_own() {
+        let outside = Outside {
+            proxy_socket: PathBuf::from("/run/anna/proxy.sock"),
+            toolchains: Toolchains::default(),
+            time_limit: Duration::from_secs(60),
+            scopes: false,
+        };
+        let sandbox = |writable| Sandbox {
+            project: PathBuf::from("/srv/project"),
+            profile: PathBuf::from("/data/hands/h1/profile"),
+            outside: &outside,
+            broker_socket: None,
+            writable,
+            build_dir: PathBuf::from("/data/builds/abc"),
+            services: Vec::new(),
+        };
+
+        let hand: Vec<&str> = sandbox(true).tools().split(',').collect();
+        let reviewer: Vec<&str> = sandbox(false).tools().split(',').collect();
+        assert!(hand.contains(&"Edit") && hand.contains(&"Bash"));
+        assert!(!reviewer.contains(&"Edit") && !reviewer.contains(&"Write"), "a reviewer changes nothing");
+        for spends_more in ["Agent", "Task", "Workflow", "Monitor", "CronCreate"] {
+            assert!(!hand.contains(&spends_more) && !reviewer.contains(&spends_more), "{spends_more} would start more sessions");
+        }
     }
 
     #[test]

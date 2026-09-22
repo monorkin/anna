@@ -49,7 +49,7 @@ pub fn review(hand: &Hand, brief: &str, report: &str, outside: &Outside, started
         services: hand.services().to_vec(),
     };
     let mut command = sandbox.claude(&claude::binary()?);
-    command.args(["--dangerously-skip-permissions", "--strict-mcp-config"]);
+    command.args(["--dangerously-skip-permissions", "--strict-mcp-config", "--tools", sandbox.tools()]);
 
     let outcome = claude::reply_of(&mut command, &prompt(brief, report), outside.time_limit, Some(started));
     transcripts::keep(&directory.join("profile"), hand_id, true);

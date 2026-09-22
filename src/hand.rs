@@ -118,7 +118,7 @@ impl Hand {
         };
 
         let mut command = sandbox.claude(&claude::binary()?);
-        command.args(["--dangerously-skip-permissions", "--strict-mcp-config"]);
+        command.args(["--dangerously-skip-permissions", "--strict-mcp-config", "--tools", sandbox.tools()]);
         if self.granted.is_some() {
             command.args(["--mcp-config", &broker::mcp_config(Path::new(sandbox::BROKER_INSIDE))]);
         }
