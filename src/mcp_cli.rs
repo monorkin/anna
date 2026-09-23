@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use crate::config::{Config, McpServer};
 use crate::control;
 use crate::mcp::{self, Server};
+use crate::skills;
 
 pub fn add(name: &str, command: &[String], trusted_only: bool) -> Result<()> {
     let mut settings = settings_for(command)?;
@@ -58,6 +59,13 @@ pub fn register(name: &str, mut settings: McpServer) -> Result<()> {
         }
     }
     settings.fingerprint = Some(mcp::fingerprint_of(&settings).with_context(|| format!("{name} did not start"))?);
+    // A tool that hides its parameters behind a describe action is asked
+    // here, once, rather than by every conversation that uses it
+    match skills::write_for_server(name, &settings) {
+        Ok(written) if !written.is_empty() => println!("Wrote down what these tools take: {}.", written.join(", ")),
+        Ok(_) => {}
+        Err(error) => println!("Couldn't write down what its tools take: {error:#}"),
+    }
     config.mcp_servers.insert(name.to_string(), settings);
     config.save()
 }

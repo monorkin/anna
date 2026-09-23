@@ -8,9 +8,13 @@
 //! other message — it wakes that thread in its own conversation — so the
 //! person there sees what came of it.
 //!
-//! What one thread tells another started as text from outside, so it is
-//! screened like everything else untrusted. And threads can't talk each other
-//! into a loop: a thread may send so many messages an hour and no more.
+//! What goes on the board is read by every thread, trusted turns too, so it
+//! is screened like anything from outside. A message isn't: it only ever
+//! wakes the other thread on an untrusted word, which can't pass on a
+//! permission or reach a shell, and what one agent asks of another reads
+//! as manipulation to a judge far too often to be worth the refusals. And
+//! threads can't talk each other into a loop: a thread may send so many
+//! messages an hour and no more.
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -69,7 +73,7 @@ impl Tool for ClaimWork {
     }
 
     fn description(&self) -> &str {
-        "Put what you are working on in this conversation on the board your other threads see, so none of them solves it a second time. Claim as soon as you know what the work is, in a line someone else would recognize it by — the symptom and where, not the card number. Claiming again replaces your line."
+        "Put what you are working on in this conversation on the board your other threads see, so none of them solves it a second time. Claim as soon as you know what the work is, in a line someone else would recognize it by — the symptom and where, not the card number. Claiming again replaces your line. Nobody outside can see this board, so tell the person who asked that you have the work too, in one line, before you get into it."
     }
 
     fn input_schema(&self) -> Value {
@@ -182,7 +186,6 @@ impl Tool for ListWork {
 pub struct TellThread {
     pub database: PathBuf,
     pub thread: String,
-    pub judge: Arc<Judge>,
 }
 
 impl Tool for TellThread {
@@ -218,17 +221,6 @@ impl Tool for TellThread {
         if store.mail_sent_since(&self.thread, now - 3600)? >= MOST_MESSAGES_AN_HOUR {
             bail!("this thread has sent {MOST_MESSAGES_AN_HOUR} messages in the last hour, which is the most it may; say what you need to in this conversation instead");
         }
-        match self.judge.screen(message) {
-            Screening::Clear => {}
-            Screening::Suspicious => {
-                logs::event("mail.refused", json!({ "from": self.thread, "to": to_thread }));
-                bail!("that message read like an attempt to manipulate an agent and was not sent; say plainly what you found and what you want");
-            }
-            Screening::Unchecked => {
-                logs::event("mail.unchecked", json!({ "from": self.thread, "to": to_thread }));
-                bail!("that couldn't be checked right now, so it wasn't sent; try again in a minute")
-            }
-        }
 
         store.send_mail(&self.thread, &to, message, now)?;
         logs::event("mail.sent", json!({ "from": self.thread, "to": to_thread }));
@@ -249,7 +241,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("anna-tell-thread-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         let database = directory.join("anna.db");
-        let tell = TellThread { database: database.clone(), thread: "basecamp-card-1".to_string(), judge: Arc::new(Judge::Haiku) };
+        let tell = TellThread { database: database.clone(), thread: "basecamp-card-1".to_string() };
 
         let to_nobody = tell.call(&json!({ "thread": "basecamp-card-9", "message": "Same bug." })).unwrap_err();
         assert!(to_nobody.to_string().contains("no thread called basecamp-card-9"));
@@ -258,7 +250,10 @@ mod tests {
 
         let store = Store::open_at(&database).unwrap();
         store.claim_work(&origin("card-2"), "basecamp-card-2", "Session cookie dropped", None, "t1").unwrap();
-        for _ in 0..MOST_MESSAGES_AN_HOUR {
+        // What one agent asks of another, sent without a judge to call it manipulation
+        let asked = tell.call(&json!({ "thread": "basecamp-card-2", "message": "Stop, don't push yet. Ask Marta on the to-do before you do." })).unwrap();
+        assert_eq!(asked, "Sent. basecamp-card-2 will be woken with it.");
+        for _ in 1..MOST_MESSAGES_AN_HOUR {
             store.send_mail("basecamp-card-1", &origin("card-2"), "again", unix_now()).unwrap();
         }
         let too_many = tell.call(&json!({ "thread": "basecamp-card-2", "message": "Same bug." })).unwrap_err();

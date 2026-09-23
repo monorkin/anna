@@ -573,7 +573,10 @@ fn basecamp_source(profile: &str, watches: bool, anyone: bool) -> Source {
 /// How a user of the agent's own hears things in Basecamp: its
 /// notifications, the "Hey!" menu, worked out against the real thing. The
 /// same notification is bumped for every new comment, so what makes one
-/// new is its id and when it went unread; the body is an excerpt, so the
+/// new is its id and when it went unread; the conversation is what the
+/// notification is about — the to-do, the message — named by its
+/// subscription, because a comment, a mention and an assignment on one to-do
+/// are each a notification of their own; the body is an excerpt, so the
 /// thread gets the title, the excerpt and the link to read the rest; and
 /// there is no single call that answers, so the thread answers with
 /// Basecamp's own tools. The profile lives in the person's own command
@@ -589,7 +592,7 @@ fn basecamp_notifications_source(profile: Option<&str>, account: &str, watches: 
         every_seconds: if watches { 900 } else { 60 },
         items: "/unreads".to_string(),
         id: Pointers::Several(words(&["/id", "/unread_at"])),
-        conversation: "/readable_sgid".to_string(),
+        conversation: "/subscription_url".to_string(),
         sender: "/creator/id".to_string(),
         sender_name: Some("/creator/name".to_string()),
         anyone,

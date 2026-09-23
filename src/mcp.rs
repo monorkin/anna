@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use crate::broker::Tool;
 use crate::config::{self, Config, McpServer};
 use crate::conversation::Standing;
-use crate::editor::Editor;
+use crate::editor::{Editor, SentBack};
 use crate::held::HeldBack;
 use crate::judge::{Judge, Screening};
 use crate::logs;
@@ -264,11 +264,11 @@ impl Catalog {
     /// trusted doesn't get the tools of a server that acts as the person
     /// Anna works for: they could otherwise have her do things in that
     /// person's name.
-    pub fn for_standing(&self, standing: Standing) -> Vec<Box<dyn Tool>> {
+    pub fn for_standing(&self, standing: Standing, sent_back: &Arc<SentBack>) -> Vec<Box<dyn Tool>> {
         self.tools
             .iter()
             .filter(|it| standing == Standing::Trusted || !it.trusted_only)
-            .map(|it| Box::new(it.clone()) as Box<dyn Tool>)
+            .map(|it| Box::new(Offering { offered: it.clone(), sent_back: sent_back.clone() }) as Box<dyn Tool>)
             .collect()
     }
 
@@ -292,7 +292,8 @@ impl Catalog {
         } else if !tool.only_reads {
             bail!("{name} can change things out there, and its server doesn't say otherwise, so a hand can't have it. Have the hand report to you and use {name} yourself.")
         } else {
-            Ok(Box::new(tool.clone()))
+            // Nothing it carries goes past the editor, so there is nothing to count
+            Ok(Box::new(Offering { offered: tool.clone(), sent_back: Arc::default() }))
         }
     }
 }
@@ -323,7 +324,7 @@ fn fingerprint(listing: &[Value]) -> String {
     format!("{hash:016x}")
 }
 
-fn offered_name(server: &str, tool: &str) -> String {
+pub fn offered_name(server: &str, tool: &str) -> String {
     if tool.starts_with(server) {
         tool.to_string()
     } else {
@@ -331,21 +332,34 @@ fn offered_name(server: &str, tool: &str) -> String {
     }
 }
 
-impl Tool for Arc<Offered> {
+/// A tool as one turn has it: the editor counts what it sends back to that
+/// turn, whichever tool the writing went out through.
+struct Offering {
+    offered: Arc<Offered>,
+    sent_back: Arc<SentBack>,
+}
+
+impl Tool for Offering {
     fn name(&self) -> &str {
-        &self.name
+        &self.offered.name
     }
 
     fn description(&self) -> &str {
-        &self.description
+        &self.offered.description
     }
 
     fn input_schema(&self) -> Value {
-        self.input_schema.clone()
+        self.offered.input_schema.clone()
     }
 
     fn call(&self, arguments: &Value) -> Result<String> {
-        let arguments = with_prose_polished(arguments, &self.prose_arguments, |text| self.editor.polish(text))?;
+        self.offered.call(arguments, &self.sent_back)
+    }
+}
+
+impl Offered {
+    fn call(&self, arguments: &Value, sent_back: &SentBack) -> Result<String> {
+        let arguments = with_prose_polished(arguments, &self.prose_arguments, |text| self.editor.polish(text, sent_back))?;
 
         // An error is the server's text as much as a result is: a refusal
         // that quotes what it was sent carries whatever an attacker put there
@@ -508,12 +522,13 @@ done
             })
         };
 
-        assert_eq!(Tool::call(&offered("shout"), &json!({})).unwrap(), "HELLO");
-        assert_eq!(Tool::call(&offered("whisper"), &json!({})).unwrap_err().to_string(), "no such tool");
+        let turn = SentBack::default();
+        assert_eq!(offered("shout").call(&json!({}), &turn).unwrap(), "HELLO");
+        assert_eq!(offered("whisper").call(&json!({}), &turn).unwrap_err().to_string(), "no such tool");
 
-        let withheld_result = Tool::call(&offered("shout"), &json!({})).unwrap_err().to_string();
+        let withheld_result = offered("shout").call(&json!({}), &turn).unwrap_err().to_string();
         assert!(withheld_result.starts_with("The result of this call was withheld"));
-        let withheld_error = Tool::call(&offered("whisper"), &json!({})).unwrap_err().to_string();
+        let withheld_error = offered("whisper").call(&json!({}), &turn).unwrap_err().to_string();
         assert!(withheld_error.starts_with("This call failed, and what the server said about it was withheld"));
         assert!(!withheld_error.contains("no such tool"));
     }
@@ -562,12 +577,13 @@ done
         let writes = catalog.grant(&["mail_threads".to_string()], trusted).err().unwrap().to_string();
         assert!(writes.contains("can change things out there"), "a server added today has no prose marked, and still can't post through a hand");
         assert!(catalog.grant(&["mail_digest".to_string()], trusted).err().unwrap().to_string().contains("speaks to people"));
-        assert_eq!(catalog.for_standing(trusted).len(), 4, "the thread itself still gets everything");
+        let turn = Arc::new(SentBack::default());
+        assert_eq!(catalog.for_standing(trusted, &turn).len(), 4, "the thread itself still gets everything");
 
         // A server that acts as the person: never for a turn on an untrusted word
         assert_eq!(catalog.grant(&["my_inbox".to_string()], trusted).unwrap().len(), 1);
         assert!(catalog.grant(&["my_inbox".to_string()], Standing::CanAssignWork).is_err());
-        let offered_to_anyone: Vec<String> = catalog.for_standing(Standing::CanAssignWork).iter().map(|it| it.name().to_string()).collect();
+        let offered_to_anyone: Vec<String> = catalog.for_standing(Standing::CanAssignWork, &turn).iter().map(|it| it.name().to_string()).collect();
         assert_eq!(offered_to_anyone, ["mail_search", "mail_threads", "mail_digest"]);
     }
 

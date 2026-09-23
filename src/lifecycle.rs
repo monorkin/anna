@@ -91,6 +91,16 @@ pub fn poke(source: Option<&str>) -> Result<()> {
     }
 }
 
+pub fn tell(thread: &str, message: &str) -> Result<()> {
+    let answer = control::ask(json!({ "command": "tell", "thread": thread, "message": message }))?;
+    if answer["ok"].as_bool().unwrap_or(false) {
+        println!("{}", text(&answer["message"]));
+        Ok(())
+    } else {
+        bail!("{}", text(&answer["message"]))
+    }
+}
+
 /// `anna run` in a session of its own, so it survives the terminal that
 /// started it, with its output kept where `start` can point at it.
 fn start_in_the_background() -> Result<()> {

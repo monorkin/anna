@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use crate::broker::Tool;
 use crate::claude::Started;
 use crate::conversation::{Conversation, Standing};
-use crate::editor::Editor;
+use crate::editor::{Editor, SentBack};
 use crate::hand::Hand;
 use crate::held::{HeldBack, ReadHeldBack};
 use crate::judge::{Judge, Screening};
@@ -58,6 +58,7 @@ impl Hands {
 pub struct Reply {
     pub conversation: Arc<dyn Conversation>,
     pub editor: Arc<Editor>,
+    pub sent_back: Arc<SentBack>,
     pub spoke: Arc<AtomicBool>,
 }
 
@@ -75,7 +76,7 @@ impl Tool for Reply {
     }
 
     fn call(&self, arguments: &Value) -> Result<String> {
-        let text = self.editor.polish(text_of(arguments, "text")?)?;
+        let text = self.editor.polish(text_of(arguments, "text")?, &self.sent_back)?;
         self.conversation.say(&text)?;
         self.spoke.store(true, Ordering::Relaxed);
         Ok("Sent.".to_string())
@@ -332,7 +333,7 @@ mod tests {
         let conversation = Arc::new(Recorded { said: Mutex::new(Vec::new()) });
         let spoke = Arc::new(AtomicBool::new(false));
         let editor = Arc::new(Editor::new(None, Arc::new(crate::judge::Judge::Haiku)));
-        let reply = Reply { conversation: conversation.clone(), editor, spoke: spoke.clone() };
+        let reply = Reply { conversation: conversation.clone(), editor, sent_back: Arc::default(), spoke: spoke.clone() };
 
         assert!(reply.call(&json!({ "text": "  " })).is_err());
         assert!(!spoke.load(Ordering::Relaxed));

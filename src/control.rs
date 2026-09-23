@@ -27,6 +27,7 @@ use crate::paths;
 pub trait Controls: Send + Sync {
     fn status(&self) -> Value;
     fn poke(&self, source: Option<&str>) -> Result<String>;
+    fn tell(&self, thread: &str, message: &str) -> Result<String>;
     fn stop(&self);
 }
 
@@ -90,6 +91,13 @@ fn answer(connection: UnixStream, controls: &dyn Controls) -> Result<()> {
             Ok(message) => writeln!(connection, "{}", json!({ "ok": true, "message": message }))?,
             Err(error) => writeln!(connection, "{}", json!({ "ok": false, "message": format!("{error:#}") }))?,
         },
+        Some("tell") => match (request["thread"].as_str(), request["message"].as_str()) {
+            (Some(thread), Some(message)) => match controls.tell(thread, message) {
+                Ok(told) => writeln!(connection, "{}", json!({ "ok": true, "message": told }))?,
+                Err(error) => writeln!(connection, "{}", json!({ "ok": false, "message": format!("{error:#}") }))?,
+            },
+            _ => writeln!(connection, "{}", json!({ "ok": false, "message": "tell needs a thread and a message" }))?,
+        },
         Some("stop") => {
             writeln!(connection, "{}", json!({ "ok": true, "message": "Stopping." }))?;
             connection.flush()?;
@@ -124,6 +132,7 @@ mod tests {
     #[derive(Default)]
     struct Recorded {
         poked: Mutex<Vec<Option<String>>>,
+        told: Mutex<Vec<(String, String)>>,
         stopped: Mutex<bool>,
     }
 
@@ -138,6 +147,11 @@ mod tests {
             }
             self.poked.lock().unwrap().push(source.map(String::from));
             Ok("Checking.".to_string())
+        }
+
+        fn tell(&self, thread: &str, message: &str) -> Result<String> {
+            self.told.lock().unwrap().push((thread.to_string(), message.to_string()));
+            Ok(format!("Told {thread}."))
         }
 
         fn stop(&self) {
@@ -169,6 +183,10 @@ mod tests {
         let refused = exchange(&controls, json!({ "command": "poke", "source": "nowhere" }));
         assert_eq!(refused["ok"], false);
         assert_eq!(refused["message"], "there is no source called nowhere");
+
+        assert_eq!(exchange(&controls, json!({ "command": "tell", "thread": "t1", "message": "Push it" }))["message"], "Told t1.");
+        assert_eq!(exchange(&controls, json!({ "command": "tell", "thread": "t1" }))["ok"], false);
+        assert_eq!(*controls.told.lock().unwrap(), [("t1".to_string(), "Push it".to_string())]);
 
         assert_eq!(exchange(&controls, json!({ "command": "dance" }))["ok"], false);
         assert!(!*controls.stopped.lock().unwrap());

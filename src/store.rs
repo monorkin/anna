@@ -297,6 +297,18 @@ impl Store {
         Ok(origin)
     }
 
+    /// Every thread that has ever been on the board, done or not, whose name
+    /// has `part` in it.
+    pub fn threads_named(&self, part: &str) -> Result<Vec<(String, Origin)>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT thread, source, conversation FROM work WHERE instr(thread, ?1) > 0 ORDER BY thread")?;
+        let threads = statement
+            .query_map(params![part], |row| Ok((row.get(0)?, Origin { source: row.get(1)?, conversation: row.get(2)? })))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(threads)
+    }
+
     pub fn send_mail(&self, from_thread: &str, to: &Origin, body: &str, now: i64) -> Result<()> {
         self.connection.execute(
             "INSERT INTO mail (from_thread, to_source, to_conversation, body, sent) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -411,6 +423,10 @@ mod tests {
         assert!(store.finish_work(&origin("card-2"), "t4").unwrap());
         assert!(!store.finish_work(&origin("card-2"), "t5").unwrap());
         assert_eq!(store.open_work_of_others(&origin("card-1")).unwrap(), []);
+
+        assert_eq!(store.threads_named("card-2").unwrap(), [("basecamp-card-2".to_string(), origin("card-2"))], "done work can still be found");
+        assert_eq!(store.threads_named("card").unwrap().len(), 2);
+        assert_eq!(store.threads_named("nobody").unwrap(), []);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

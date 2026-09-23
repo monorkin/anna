@@ -27,6 +27,7 @@ mod schedule_tools;
 mod secrets;
 mod service;
 mod setup;
+mod skills;
 mod source;
 mod source_cli;
 mod store;
@@ -90,6 +91,8 @@ enum Command {
         #[usage(long, default = "main")]
         conversation: String,
     },
+    /// Say something straight to one of her threads, with your standing; any part of its name will do
+    Tell { thread: String, message: String },
     /// Show what Anna has been doing
     Log {
         /// Keep printing as things happen
@@ -105,6 +108,11 @@ enum Command {
     Mcp {
         #[usage(subcommand)]
         command: McpCommand,
+    },
+    /// Manage what she knows about using a tool before she calls it
+    Skill {
+        #[usage(subcommand)]
+        command: SkillCommand,
     },
     /// Look at the places Anna listens
     Source {
@@ -145,6 +153,16 @@ enum ClaudeCommand {
     },
     /// Who Anna is logged in as right now
     Whoami,
+}
+
+#[derive(Subcommands)]
+enum SkillCommand {
+    /// Give her a skill of your own: the folder with its SKILL.md in it
+    Add { folder: std::path::PathBuf },
+    /// What she knows
+    List,
+    /// Take one away
+    Remove { name: String },
 }
 
 #[derive(Subcommands)]
@@ -216,6 +234,7 @@ fn run(cli: Cli) -> Result<()> {
             // Whoever is at this terminal can already do anything Anna can
             thread::wake(&Runtime::start()?, Arc::new(Terminal::new(&conversation)), Standing::Trusted, &message)
         }
+        Command::Tell { thread, message } => lifecycle::tell(&thread, &message),
         Command::Log { follow, only } => logs::print(follow, only.as_deref()),
         Command::Transcript { id: Some(id) } => transcripts::show(&id),
         Command::Transcript { id: None } => transcripts::list(),
@@ -224,6 +243,15 @@ fn run(cli: Cli) -> Result<()> {
             McpCommand::List => mcp_cli::list(),
             McpCommand::Remove { name } => mcp_cli::remove(&name),
             McpCommand::Prose { name, tool, argument } => mcp_cli::mark_prose(&name, &tool, &argument),
+        },
+        Command::Skill { command } => match command {
+            SkillCommand::Add { folder } => {
+                let name = skills::add(&folder)?;
+                println!("Added {name}. Her threads read it when they need it.");
+                Ok(())
+            }
+            SkillCommand::List => skills::list(),
+            SkillCommand::Remove { name } => skills::remove(&name),
         },
         Command::Source { command } => match command {
             SourceCommand::Check { name } => source_cli::check(&name),

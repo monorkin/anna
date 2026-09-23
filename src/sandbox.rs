@@ -1,8 +1,9 @@
 //! The sandbox a Claude Code session runs in when it touches a project.
 //!
 //! Bubblewrap with every namespace unshared. The session sees a read-only
-//! /usr, the project at /work, its own profile, and the proxy's socket — no
-//! home directory, no network. socat turns the socket into the localhost
+//! /usr, the project, its own profile, and the proxy's socket — no home
+//! directory, no network. The project is where it is outside: git keeps
+//! absolute paths, and a worktree made on either side has to work on both. socat turns the socket into the localhost
 //! proxy Claude Code is pointed at, so the Claude API is the only thing it
 //! can reach. Permissions are skipped inside, because the sandbox is the
 //! permission system.
@@ -169,7 +170,8 @@ impl Sandbox<'_> {
         }
 
         command
-            .args(["--chdir", "/work"])
+            .arg("--chdir")
+            .arg(&self.project)
             .args(["--setenv", "HOME", "/home/hand"])
             .args(["--setenv", "LANG", "C.UTF-8"])
             .args(["--setenv", "PATH", &self.outside.toolchains.path()])
@@ -193,9 +195,9 @@ impl Sandbox<'_> {
     /// A reviewer can look and run things, not change them.
     pub fn tools(&self) -> &'static str {
         if self.writable {
-            "Bash,Read,Edit,Write,Glob,Grep,ToolSearch,TaskOutput,TaskStop"
+            "Bash,Read,Edit,Write,Glob,Grep,Skill,ToolSearch,TaskOutput,TaskStop"
         } else {
-            "Bash,Read,Glob,Grep,ToolSearch,TaskOutput,TaskStop"
+            "Bash,Read,Glob,Grep,Skill,ToolSearch,TaskOutput,TaskStop"
         }
     }
 
@@ -231,41 +233,67 @@ impl Sandbox<'_> {
     }
 
     fn bind_project(&self, command: &mut Command) {
+        let git = self.project.join(".git");
+        let holding = repository_holding(&self.project);
         if self.writable {
-            command.arg("--bind").arg(&self.project).arg("/work");
-            let git = self.project.join(".git");
+            command.arg("--bind").arg(&self.project).arg(&self.project);
             if git.join("HEAD").is_file() {
-                self.lock_git(command);
+                lock_git(command, &self.project);
             } else if git.is_file() {
                 // A worktree's .git is a file that says where the real one
                 // is; rewritten, it would point the brain's git anywhere
-                command.arg("--ro-bind").arg(&git).arg("/work/.git");
+                command.arg("--ro-bind").arg(&git).arg(&git);
+                if let Some(repository) = &holding {
+                    lock_git(command, repository);
+                }
             } else {
                 // Starting a repository is the brain's to do. A hand that
                 // could would write the hooks and config of one from scratch
-                command.args(["--tmpfs", "/work/.git", "--remount-ro", "/work/.git"]);
+                command.arg("--tmpfs").arg(&git).arg("--remount-ro").arg(&git);
             }
         } else {
-            command.arg("--ro-bind").arg(&self.project).arg("/work");
-        }
-    }
-
-    /// .git becomes its own mount so it can't be renamed out of the way and
-    /// replaced, and the parts of it that run code become read-only. A part
-    /// that doesn't exist yet is covered with an empty read-only tmpfs so it
-    /// can't be created either.
-    fn lock_git(&self, command: &mut Command) {
-        command.arg("--bind").arg(self.project.join(".git")).arg("/work/.git");
-
-        for part in GIT_PARTS_THAT_RUN_CODE {
-            let outside = self.project.join(part);
-            let inside = Path::new("/work").join(part);
-            if outside.exists() {
-                command.arg("--ro-bind").arg(outside).arg(inside);
-            } else {
-                command.arg("--tmpfs").arg(&inside).arg("--remount-ro").arg(&inside);
+            command.arg("--ro-bind").arg(&self.project).arg(&self.project);
+            if let Some(repository) = &holding {
+                let git = repository.join(".git");
+                command.arg("--ro-bind").arg(&git).arg(&git);
             }
         }
+    }
+}
+
+/// .git becomes its own mount so it can't be renamed out of the way and
+/// replaced, and the parts of it that run code become read-only. A part
+/// that doesn't exist yet is covered with an empty read-only tmpfs so it
+/// can't be created either.
+fn lock_git(command: &mut Command, repository: &Path) {
+    let git = repository.join(".git");
+    command.arg("--bind").arg(&git).arg(&git);
+
+    for part in GIT_PARTS_THAT_RUN_CODE {
+        let part = repository.join(part);
+        if part.exists() {
+            command.arg("--ro-bind").arg(&part).arg(&part);
+        } else {
+            command.arg("--tmpfs").arg(&part).arg("--remount-ro").arg(&part);
+        }
+    }
+}
+
+/// The repository a linked worktree keeps its git in, when that repository
+/// holds the worktree — the .claude/worktrees layout — so a session in the
+/// worktree can use git. Only the nearest repository above it counts, and
+/// only when the worktree's .git file points into that repository's own
+/// worktrees: that file sits where a hand working in the repository could
+/// have rewritten it, and it must not bring in anything else.
+fn repository_holding(project: &Path) -> Option<PathBuf> {
+    let pointer = std::fs::read_to_string(project.join(".git")).ok()?;
+    let gitdir = project.join(pointer.strip_prefix("gitdir:")?.trim()).canonicalize().ok()?;
+    let repository = project.ancestors().skip(1).find(|it| it.join(".git/HEAD").is_file())?;
+    let worktrees = repository.join(".git/worktrees").canonicalize().ok()?;
+    if gitdir.starts_with(&worktrees) {
+        Some(repository.to_path_buf())
+    } else {
+        None
     }
 }
 
@@ -318,7 +346,7 @@ mod tests {
         let git = format!("{project_path}/.git");
         assert_eq!(
             binds(&arguments, "--bind"),
-            [(project_path, "/work"), (git.as_str(), "/work/.git"), ("/data/hands/h1/profile", "/profile"), ("/data/builds/abc", BUILD_INSIDE)]
+            [(project_path, project_path), (git.as_str(), git.as_str()), ("/data/hands/h1/profile", "/profile"), ("/data/builds/abc", BUILD_INSIDE)]
         );
         assert!(binds(&arguments, "--ro-bind").contains(&("/run/anna/service-h1-0.sock", "/run/service-0.sock")));
         assert!(arguments.last().unwrap() == "sandbox" && arguments[arguments.len() - 2].contains("TCP-LISTEN:33380,fork,bind=127.0.0.1 UNIX-CONNECT:/run/service-0.sock"));
@@ -326,9 +354,11 @@ mod tests {
         assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "CLAUDE_CODE_DISABLE_WORKFLOWS" && it[2] == "1"));
         assert!(!arguments.iter().any(|it| it == "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"), "a hand may run its tests in the background");
         let read_only = binds(&arguments, "--ro-bind");
-        assert!(read_only.contains(&(format!("{git}/config").as_str(), "/work/.git/config")));
-        assert!(read_only.contains(&(format!("{git}/hooks").as_str(), "/work/.git/hooks")));
-        assert!(arguments.windows(2).any(|it| it[0] == "--remount-ro" && it[1] == "/work/.git/modules"));
+        let config = format!("{git}/config");
+        let hooks = format!("{git}/hooks");
+        assert!(read_only.contains(&(config.as_str(), config.as_str())));
+        assert!(read_only.contains(&(hooks.as_str(), hooks.as_str())));
+        assert!(arguments.windows(2).any(|it| it[0] == "--remount-ro" && it[1] == format!("{git}/modules")));
         assert!(!arguments.iter().any(|it| it == "/home" || it == "/etc"));
         assert!(!arguments.iter().any(|it| it == BROKER_INSIDE));
 
@@ -386,6 +416,75 @@ mod tests {
         assert_eq!(run(&plain, "touch /build/made-here && echo built").trim(), "built");
         assert!(build_dir.join("made-here").exists(), "builds land in the folder given for them");
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// git keeps absolute paths: a worktree the person made works for a
+    /// hand, and one a hand made works for the person.
+    #[test]
+    fn worktrees_work_on_both_sides_of_the_sandbox() {
+        if crate::paths::program("bwrap").is_none() || crate::paths::program("socat").is_none() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("anna-sandbox-git-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(root.join("profile")).unwrap();
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::write(root.join("proxy.sock"), "").unwrap();
+        let git = |arguments: &[&str]| {
+            let output = Command::new("git").arg("-C").arg(&project).args(arguments).output().unwrap();
+            assert!(output.status.success(), "git {arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Someone"]);
+        git(&["config", "user.email", "someone@example.com"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "Start"]);
+        git(&["worktree", "add", "-q", ".claude/worktrees/outside", "-b", "outside"]);
+
+        let outside = Outside {
+            proxy_socket: root.join("proxy.sock"),
+            toolchains: Toolchains::default(),
+            time_limit: Duration::from_secs(60),
+            scopes: Outside::can_have_scopes(),
+        };
+        let run = |project: &Path, script: &str| {
+            let sandbox = Sandbox {
+                project: project.to_path_buf(),
+                profile: root.join("profile"),
+                outside: &outside,
+                broker_socket: None,
+                writable: true,
+                build_dir: root.join("build"),
+                services: Vec::new(),
+            };
+            let output = sandbox.claude(Path::new("/usr/bin/bash")).args(["-c", script]).output().unwrap();
+            format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
+        };
+
+        let said = run(&project, "git -C .claude/worktrees/outside commit -q --allow-empty -m 'Made inside' && git worktree add -q .claude/worktrees/inside -b inside && echo done");
+        assert_eq!(said.trim(), "done");
+        assert_eq!(git(&["log", "-1", "--format=%s", "outside"]).trim(), "Made inside");
+        let inside = project.join(".claude/worktrees/inside");
+        let status = Command::new("git").arg("-C").arg(&inside).args(["status", "--short", "--branch"]).output().unwrap();
+        assert!(String::from_utf8_lossy(&status.stdout).starts_with("## inside"), "{}", String::from_utf8_lossy(&status.stderr));
+
+        let said = run(&project.join(".claude/worktrees/outside"), "git commit -q --allow-empty -m 'Made in the worktree' && echo done; (echo evil > ../../../.git/hooks/pre-commit) 2>/dev/null || echo refused");
+        assert_eq!(said.lines().collect::<Vec<_>>(), ["done", "refused"], "{said}");
+        assert_eq!(git(&["log", "-1", "--format=%s", "outside"]).trim(), "Made in the worktree");
+
+        // A .git file a hand rewrote to point at some other repository
+        let elsewhere = root.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        Command::new("git").arg("-C").arg(&elsewhere).args(["init", "-q"]).output().unwrap();
+        fs::create_dir_all(elsewhere.join(".git/worktrees/stolen")).unwrap();
+        let planted = project.join(".claude/worktrees/planted");
+        fs::create_dir_all(&planted).unwrap();
+        fs::write(planted.join(".git"), format!("gitdir: {}\n", elsewhere.join(".git/worktrees/stolen").display())).unwrap();
+        let said = run(&planted, &format!("ls {} 2>/dev/null || echo unseen", elsewhere.join(".git").display()));
+        assert_eq!(said.trim(), "unseen");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -516,7 +615,7 @@ mod tests {
         assert!(arguments.windows(3).any(|it| {
             it[0] == "--setenv" && it[1] == "PATH" && it[2] == "/home/someone/.local/share/mise/installs/ruby/3.4.7/bin:/usr/bin"
         }));
-        assert!(binds(&arguments, "--ro-bind").contains(&("/home/someone/project", "/work")));
+        assert!(binds(&arguments, "--ro-bind").contains(&("/home/someone/project", "/home/someone/project")));
         assert!(binds(&arguments, "--ro-bind").contains(&("/run/anna/hand-h1.sock", BROKER_INSIDE)));
     }
 }

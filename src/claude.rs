@@ -28,6 +28,10 @@ pub struct Reply {
     pub session_id: String,
     #[serde(default)]
     pub is_error: bool,
+    /// None from a stand-in; from claude, 0 means the prompt never reached
+    /// the model — a hook blocked it — though claude calls that a success.
+    #[serde(default)]
+    pub num_turns: Option<u32>,
 }
 
 pub fn binary() -> Result<PathBuf> {
@@ -137,6 +141,9 @@ pub fn reply_of(command: &mut Command, told: &str, limit: Duration, started: Opt
     }
     if reply.is_error {
         bail!("claude reported an error: {}", reply.result);
+    }
+    if reply.num_turns == Some(0) {
+        bail!("what was said never reached the model: {}", reply.result);
     }
     Ok(reply)
 }
@@ -324,6 +331,9 @@ pub fn write_hand_profile(profile: &Path) -> Result<()> {
     let identity: Value = read_json(&home.join(".claude.json"))?;
 
     write_private(&profile.join(".credentials.json"), &access_only(&credentials)?)?;
+    // A sandboxed session sees no folder of hers but this one, and what she
+    // knows about using a tool is worth as much to a hand as to a thread
+    crate::skills::copy_into_profile(profile)?;
     write_private(
         &profile.join(".claude.json"),
         &json!({
@@ -386,6 +396,12 @@ mod tests {
         let mut failing = Command::new("sh");
         failing.args(["-c", r#"echo '{"result":"no quota","session_id":"s2","is_error":true}'"#]);
         assert!(reply_of(&mut failing, "", Duration::from_secs(10), None).unwrap_err().to_string().contains("no quota"));
+
+        // What claude answers when a UserPromptSubmit hook blocks the prompt
+        let mut blocked = Command::new("sh");
+        blocked.args(["-c", r#"echo '{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"UserPromptSubmit operation blocked by hook","session_id":"s3"}'"#]);
+        let error = reply_of(&mut blocked, "", Duration::from_secs(10), None).unwrap_err();
+        assert!(error.to_string().contains("never reached the model: UserPromptSubmit operation blocked by hook"), "{error}");
     }
 
     #[test]

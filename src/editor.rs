@@ -7,7 +7,8 @@
 //! rewrite still says the same thing. Rewriting comes before rejecting because
 //! a rejection loop spends the thread's context on restyling. Only when a
 //! faithful rewrite can't be had does the text go back to the thread, with
-//! the style attached.
+//! the style attached — three times in a turn at most. After that what she
+//! writes goes out as she wrote it.
 //!
 //! Code blocks are not prose: a rewrite has to carry every one of them
 //! through unchanged or it is thrown away.
@@ -15,6 +16,7 @@
 use anyhow::{Result, bail};
 use serde_json::json;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::claude;
 use crate::judge::Judge;
@@ -22,6 +24,12 @@ use crate::logs;
 
 const FOLLOWS_STYLE: f64 = 0.5;
 const UNFAITHFUL: f64 = 0.75;
+const MOST_TIMES_SENT_BACK: u32 = 3;
+
+/// How often the editor has sent a turn's writing back to it. Each turn
+/// keeps its own count, whichever tool the writing goes out through.
+#[derive(Default)]
+pub struct SentBack(AtomicU32);
 
 pub struct Editor {
     style: Option<String>,
@@ -33,32 +41,34 @@ impl Editor {
         Editor { style, judge }
     }
 
-    pub fn polish(&self, text: &str) -> Result<String> {
+    pub fn polish(&self, text: &str, sent_back: &SentBack) -> Result<String> {
+        self.polish_with(text, sent_back, claude::ask_haiku)
+    }
+
+    fn polish_with(&self, text: &str, sent_back: &SentBack, rewrite: impl Fn(&str, &str) -> Result<String>) -> Result<String> {
         match &self.style {
-            Some(style) => self.hold_to(style, text),
-            None => Ok(text.to_string()),
+            Some(style) if self.judge.probability(&follows_style_question(style), text)? < FOLLOWS_STYLE => {
+                self.restyle(style, text, sent_back, rewrite)
+            }
+            _ => Ok(text.to_string()),
         }
     }
 
-    fn hold_to(&self, style: &str, text: &str) -> Result<String> {
-        if self.judge.probability(&follows_style_question(style), text)? >= FOLLOWS_STYLE {
+    fn restyle(&self, style: &str, text: &str, sent_back: &SentBack, rewrite: impl Fn(&str, &str) -> Result<String>) -> Result<String> {
+        let rewritten = rewrite(&rewrite_prompt(style), text)?;
+        let unfaithfulness = self.unfaithfulness(text, &rewritten)?;
+
+        // Sizes, not the texts: the log is kept and backed up, and what she
+        // writes to people doesn't belong in it
+        if unfaithfulness < UNFAITHFUL {
+            logs::event("editor.rewrote", json!({ "from": text.len(), "to": rewritten.len(), "unfaithfulness": unfaithfulness }));
+            Ok(rewritten)
+        } else if sent_back.0.load(Ordering::Relaxed) >= MOST_TIMES_SENT_BACK {
+            logs::event("editor.let_through", json!({ "unfaithfulness": unfaithfulness, "length": text.len() }));
             Ok(text.to_string())
         } else {
-            self.restyle(style, text)
-        }
-    }
-
-    fn restyle(&self, style: &str, text: &str) -> Result<String> {
-        let rewrite = claude::ask_haiku(&rewrite_prompt(style), text)?;
-        let unfaithfulness = self.unfaithfulness(text, &rewrite)?;
-
-        if unfaithfulness < UNFAITHFUL {
-            logs::event("editor.rewrote", json!({ "from": text.len(), "to": rewrite.len(), "unfaithfulness": unfaithfulness }));
-            Ok(rewrite)
-        } else {
-            // Sizes, not the texts: the log is kept and backed up, and what
-            // she writes to people doesn't belong in it
-            logs::event("editor.rejected", json!({ "unfaithfulness": unfaithfulness, "from": text.len(), "to": rewrite.len() }));
+            sent_back.0.fetch_add(1, Ordering::Relaxed);
+            logs::event("editor.rejected", json!({ "unfaithfulness": unfaithfulness, "from": text.len(), "to": rewritten.len() }));
             bail!(
                 "This wasn't sent. It doesn't follow the style below, and it couldn't be restyled without changing what it says. Rewrite it yourself and send it again.\n\n{style}"
             )
@@ -108,7 +118,24 @@ mod tests {
     #[test]
     fn without_a_style_nothing_is_touched() {
         let editor = Editor::new(None, Arc::new(Judge::Haiku));
-        assert_eq!(editor.polish("Whatever, however long.").unwrap(), "Whatever, however long.");
+        assert_eq!(editor.polish("Whatever, however long.", &SentBack::default()).unwrap(), "Whatever, however long.");
+    }
+
+    #[test]
+    fn writing_that_cant_be_restyled_is_sent_back_three_times_a_turn_then_goes_out_as_written() {
+        // Each try: off style, and a rewrite that drops something
+        let editor = Editor::new(Some("Be brief.".to_string()), Arc::new(crate::judge::answering(&[0.1, 0.1, 0.9].repeat(5))));
+        let rewrite = |_: &str, _: &str| Ok("Short.".to_string());
+        let this_turn = SentBack::default();
+
+        for _ in 0..3 {
+            let refused = editor.polish_with("A long message.", &this_turn, rewrite).unwrap_err();
+            assert!(refused.to_string().starts_with("This wasn't sent."));
+        }
+        assert_eq!(editor.polish_with("A long message.", &this_turn, rewrite).unwrap(), "A long message.");
+
+        let next_turn = SentBack::default();
+        assert!(editor.polish_with("A long message.", &next_turn, rewrite).is_err(), "a new turn is held to the style again");
     }
 
     #[test]

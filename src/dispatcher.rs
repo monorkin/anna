@@ -115,6 +115,7 @@ pub fn run() -> Result<()> {
     control::serve(Arc::new(Running {
         since: clock::timestamp(),
         pokes: Mutex::new(pokes),
+        runtime: runtime.clone(),
         turns: turns.clone(),
     }))?;
     stop_on_signals();
@@ -136,6 +137,7 @@ pub fn run() -> Result<()> {
 struct Running {
     since: String,
     pokes: Mutex<HashMap<String, Sender<()>>>,
+    runtime: Arc<Runtime>,
     turns: Arc<Turns>,
 }
 
@@ -167,8 +169,34 @@ impl Controls for Running {
         }
     }
 
+    /// Only the owner can reach the socket, and whoever can already runs
+    /// her, so what they say is a trusted word, straight into the thread
+    /// that has the work — not one that would pass it on as mail.
+    fn tell(&self, thread: &str, message: &str) -> Result<String> {
+        let store = Store::open_at(&self.runtime.database)?;
+        let origin = thread_on_the_board(&store, thread)?;
+        let conversation = conversation_at(&self.runtime, &origin).context("that thread's source is no longer in the config")?;
+        let key = conversation.key().to_string();
+        logs::event("thread.told", json!({ "conversation": key }));
+        wake_in_turn(&self.runtime, &self.turns, conversation, Standing::Trusted, format!("{FROM_THE_TERMINAL}{message}"));
+        Ok(format!("Told {key}."))
+    }
+
     fn stop(&self) {
         stop();
+    }
+}
+
+const FROM_THE_TERMINAL: &str = "One of the people you take direction from says this to you directly, from the terminal of the machine you run on:\n\n";
+
+/// A thread by its name on the board, or by any part of it that names only
+/// one — the way `anna log --only` takes them.
+fn thread_on_the_board(store: &Store, named: &str) -> Result<Origin> {
+    let matching = store.threads_named(named)?;
+    match matching.as_slice() {
+        [(_, origin)] => Ok(origin.clone()),
+        [] => bail!("no thread on the board is called {named}"),
+        many => bail!("{named} could be any of {}", many.iter().map(|(thread, _)| thread.as_str()).collect::<Vec<_>>().join(", ")),
     }
 }
 
