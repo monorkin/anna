@@ -303,7 +303,7 @@ mod tests {
         assert!(terminal("YES\n", false).yes(&QUESTION, false).unwrap());
         assert!(!terminal("nope\n", false).yes(&QUESTION, true).unwrap());
 
-        let options = ["Work".to_string(), "Personal".to_string()];
+        let options = ["Personal".to_string(), "Work".to_string()];
         assert_eq!(terminal("7\ntwo\n2\n", false).choice(&QUESTION, &options).unwrap(), 1);
     }
 

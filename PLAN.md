@@ -540,9 +540,9 @@ pinned to one account. Needed:
   probably does the same for hooks. Inside Anna `current_exe()` is Anna, so she
   has to expose the same hidden subcommands.
 - katami: an `origin` on memories (owner, person, worker) with the class rules
-  per origin, and a speaker on transcript turns — today "user turn" means
-  the person she works for, and in Anna it can be a coworker whose words would otherwise become
-  the person she works for's preferences.
+  per origin, and a speaker on transcript turns — today "user turn" means the
+  person katami runs for, and in Anna it can be a coworker whose words would
+  otherwise become that person's preferences.
 - Two binaries on one memory store: pin Anna to the installed katami version,
   or let the schema-version check refuse the older one.
 - ax: the two account changes above.
@@ -565,12 +565,12 @@ Next:
 5. katami `origin` and speaker; hand transcripts into memory through the Jev
    risk score.
 6. Moving a running hand to another account.
-7. Move to the machine she runs on. Then Fizzy and GitHub.
+7. Move to the machine she'll live on. Then Fizzy and GitHub.
 
 ## Open questions
 
-- What does the setup config look like, and who besides the person she works for can ask for
-  what?
+- What does the setup config look like, and who besides the person she works
+  for can ask for what?
 - How big is the per-task budget, and is it tokens, time, or both?
 - Header-injecting proxy: does Claude Code's subscription login work through
   one?
