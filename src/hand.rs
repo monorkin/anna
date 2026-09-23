@@ -119,6 +119,7 @@ impl Hand {
 
         let mut command = sandbox.claude(&claude::binary()?);
         command.args(["--dangerously-skip-permissions", "--strict-mcp-config", "--tools", sandbox.tools()]);
+        command.args(["--append-system-prompt", &what_it_can_reach(&self.services)]);
         if self.granted.is_some() {
             command.args(["--mcp-config", &broker::mcp_config(Path::new(sandbox::BROKER_INSIDE))]);
         }
@@ -185,6 +186,24 @@ fn bridge(hand: &str, ports: &[u16]) -> Result<(Vec<Service>, Vec<Child>)> {
     Ok((services, bridges))
 }
 
+/// What a hand can reach, said before it starts. Without this, a database
+/// its thread didn't bridge in looks to it like a database that is down, and
+/// it reports the machine as broken instead of saying what it wasn't given.
+pub fn what_it_can_reach(services: &[Service]) -> String {
+    let reachable = match services {
+        [] => "Nothing of this machine's own is reachable from in here.".to_string(),
+        services => format!(
+            "On your own loopback you can reach {}, bridged in from this machine.",
+            services.iter().map(|it| format!("port {}", it.port)).collect::<Vec<_>>().join(" and ")
+        ),
+    };
+
+    format!(
+        "You work in a sandbox: this project folder, the languages installed here, and no network at all. {reachable} \
+         Anything else you can't reach was never given to you rather than being broken or down — don't try to start it, install it or work around it, and say in your report what you couldn't reach and what it cost."
+    )
+}
+
 /// A hand writes its project, and the brain acts on what it finds there, so
 /// a project is never a folder that holds what Anna or the person runs on:
 /// her own state, the home folder itself or anything above it, or a
@@ -213,6 +232,19 @@ fn refuse_what_is_not_a_project(project: &Path, home: &Path, her_own: &[PathBuf]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hand_is_told_what_it_can_reach_so_it_doesnt_call_it_broken() {
+        let granted = [
+            Service { port: 33380, socket: PathBuf::from("/run/anna/service-h1-0.sock") },
+            Service { port: 6379, socket: PathBuf::from("/run/anna/service-h1-1.sock") },
+        ];
+
+        let told = what_it_can_reach(&granted);
+        assert!(told.contains("you can reach port 33380 and port 6379"), "{told}");
+        assert!(told.contains("was never given to you rather than being broken"));
+        assert!(what_it_can_reach(&[]).contains("Nothing of this machine's own is reachable"));
+    }
 
     #[test]
     fn a_hand_is_kept_out_of_everything_that_is_not_a_project() {

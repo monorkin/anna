@@ -15,7 +15,7 @@ use std::fs;
 
 use crate::claude::{self, Started};
 use crate::clock;
-use crate::hand::Hand;
+use crate::hand::{self, Hand};
 use crate::logs;
 use crate::paths;
 use crate::sandbox::{Outside, Sandbox};
@@ -50,6 +50,7 @@ pub fn review(hand: &Hand, brief: &str, report: &str, outside: &Outside, started
     };
     let mut command = sandbox.claude(&claude::binary()?);
     command.args(["--dangerously-skip-permissions", "--strict-mcp-config", "--tools", sandbox.tools()]);
+    command.args(["--append-system-prompt", &hand::what_it_can_reach(hand.services())]);
 
     let outcome = claude::reply_of(&mut command, &prompt(brief, report), outside.time_limit, Some(started));
     transcripts::keep(&directory.join("profile"), hand_id, true);

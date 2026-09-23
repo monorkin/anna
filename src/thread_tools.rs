@@ -97,7 +97,7 @@ impl Tool for StartHand {
     }
 
     fn description(&self) -> &str {
-        "Start a sandboxed worker in one project folder and give it a brief. It can read and write that folder and nothing else, has no network and none of your memory, so the brief must carry everything it needs to know. It has the languages installed here and builds offline from what is already fetched, so fetch the project's dependencies yourself first (cargo fetch, bundle install, npm ci) when the work needs a build. Its builds go to a folder of their own, not the project's. When it finishes, a reviewer checks the work against your brief, and you get the hand's id and the reviewer's verdict. Then send_back or dismiss."
+        "Start a sandboxed worker in one project folder and give it a brief. It can read and write that folder and nothing else, has no network and none of your memory, so the brief must carry everything it needs to know. It has the languages installed here and builds offline from what is already fetched, so fetch the project's dependencies yourself first (cargo fetch, bundle install, npm ci) when the work needs a build. Its builds go to a folder of their own, not the project's. When it finishes, a reviewer checks the work against your brief, and you get the hand's id and the reviewer's verdict. Then send_back or dismiss. A hand takes minutes, and whoever asked hears nothing while it runs, so unless you have already said something in this turn, tell them what you're about to do in one line before you start it — one line, not an account of your reasoning."
     }
 
     fn input_schema(&self) -> Value {

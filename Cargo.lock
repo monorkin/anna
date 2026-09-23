@@ -1170,7 +1170,7 @@ dependencies = [
 [[package]]
 name = "katami"
 version = "0.3.0"
-source = "git+https://github.com/monorkin/katami.git#438061f723350cabb92e65ac0f8312647544d3fc"
+source = "git+https://github.com/monorkin/katami.git#66a54a04b70d0261f44345fd8e2e158e65c94c61"
 dependencies = [
  "anyhow",
  "candle-core",

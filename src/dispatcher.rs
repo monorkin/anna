@@ -436,12 +436,19 @@ fn wake_in_turn(runtime: &Arc<Runtime>, turns: &Arc<Turns>, conversation: Arc<dy
     turns.add(
         &key,
         Box::new(move || {
-            if let Err(error) = wake_once_there_is_quota(&runtime, &conversation, standing, &said) {
-                logs::event("thread.failed", json!({ "conversation": conversation.key(), "error": format!("{error:#}") }));
-                let _ = conversation.say("Something broke on my side before I could finish this. I've logged it; ask me again and I'll pick it back up.");
-            }
-            if let Some(id) = kept {
-                let _ = Store::open_at(&runtime.database).and_then(|store| store.forget_turn(id));
+            // A turn that finished is done with, however it went. One that
+            // broke is still owed: it stays on the queue, and the next start
+            // asks it again, because what was said may have reached nobody
+            match wake_once_there_is_quota(&runtime, &conversation, standing, &said) {
+                Ok(()) => {
+                    if let Some(id) = kept {
+                        let _ = Store::open_at(&runtime.database).and_then(|store| store.forget_turn(id));
+                    }
+                }
+                Err(error) => {
+                    logs::event("thread.failed", json!({ "conversation": conversation.key(), "error": format!("{error:#}"), "kept": kept.is_some() }));
+                    let _ = conversation.say("Something broke on my side before I could finish this. I've kept what you asked and I'll come back to it.");
+                }
             }
         }),
     );
