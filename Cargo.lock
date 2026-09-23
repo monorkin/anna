@@ -130,7 +130,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "ax"
 version = "0.1.0"
-source = "git+https://github.com/monorkin/ax.git#26e512404f20fae681240dc25cb294f03c6e8f10"
+source = "git+https://github.com/monorkin/ax.git#344c1f649bb6de27e669c4e055022d28dbadf2f8"
 dependencies = [
  "anyhow",
  "dirs",

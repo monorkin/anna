@@ -38,7 +38,9 @@ use crate::store::{PendingTurn, Store};
 use crate::thread;
 
 const SWITCH_AT_PERCENT: f64 = 90.0;
-const SECONDS_BETWEEN_ACCOUNT_CHECKS: u64 = 60;
+/// ax answers from its last reading when the endpoint was asked in the past
+/// ten minutes, so asking oftener than that only burns wake-ups.
+const SECONDS_BETWEEN_ACCOUNT_CHECKS: u64 = 600;
 const SECONDS_BEFORE_RESTARTING_A_TRIGGER: u64 = 10;
 const SECONDS_BETWEEN_LOOKS_AT_THE_CLOCK: u64 = 30;
 const MOST_TURNS_WAITING: usize = 50;
