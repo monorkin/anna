@@ -361,6 +361,18 @@ pub fn write_hand_profile(profile: &Path) -> Result<()> {
     )
 }
 
+/// A hand's copy of the login, taken again before a round: Claude Code
+/// refreshes the token in her folder now and then and the old one is
+/// revoked with it, so a hand sent back an hour later on the copy it started
+/// with would be refused at the door and discarded, work and all.
+pub fn refresh_hand_login(profile: &Path) -> Result<()> {
+    copy_login(&paths::claude_config_home().join(".credentials.json"), &profile.join(".credentials.json"))
+}
+
+fn copy_login(from: &Path, to: &Path) -> Result<()> {
+    write_private(to, &access_only(&read_json(from)?)?)
+}
+
 fn access_only(credentials: &Value) -> Result<Value> {
     let mut login = credentials["claudeAiOauth"]
         .as_object()
@@ -411,6 +423,26 @@ mod tests {
         assert_eq!(written["env"]["BASH_MAX_TIMEOUT_MS"], "3600000", "a review or a test suite can be waited for");
         assert_eq!(written["attribution"]["commit"], "");
         assert_eq!(written["attribution"]["sessionUrl"], false);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn a_hands_login_is_the_current_access_token_and_never_the_refresh_token() {
+        let home = std::env::temp_dir().join(format!("anna-hand-login-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("profile")).unwrap();
+        let hers = home.join(".credentials.json");
+        let hands = home.join("profile/.credentials.json");
+
+        fs::write(&hers, r#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"secret","expiresAt":1}}"#).unwrap();
+        copy_login(&hers, &hands).unwrap();
+        let copied: Value = read_json(&hands).unwrap();
+        assert_eq!(copied["claudeAiOauth"]["accessToken"], "old");
+        assert!(copied["claudeAiOauth"].get("refreshToken").is_none(), "a sandbox can never rotate the real login");
+
+        fs::write(&hers, r#"{"claudeAiOauth":{"accessToken":"new","refreshToken":"secret","expiresAt":2}}"#).unwrap();
+        copy_login(&hers, &hands).unwrap();
+        assert_eq!(read_json(&hands).unwrap()["claudeAiOauth"]["accessToken"], "new", "a round after a refresh runs on the token that works");
         fs::remove_dir_all(home).unwrap();
     }
 

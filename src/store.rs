@@ -296,7 +296,7 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7)
              ON CONFLICT (source, conversation) DO UPDATE SET
                  thread = excluded.thread, title = excluded.title, project = excluded.project,
-                 about = excluded.about, status = 'open', updated = excluded.updated",
+                 about = coalesce(excluded.about, work.about), status = 'open', updated = excluded.updated",
             params![origin.source, origin.conversation, thread, title, project, about, now],
         )?;
         Ok(())
@@ -503,13 +503,13 @@ mod tests {
         let (store, directory) = store("work");
         store.claim_work(&origin("card-1"), "basecamp-card-1", "Login 500s on Safari", Some("frontdesk"), None, "t1").unwrap();
         store.claim_work(&origin("card-2"), "basecamp-card-2", "Session cookie dropped", Some("frontdesk"), Some("10337671931"), "t2").unwrap();
-        store.claim_work(&origin("card-2"), "basecamp-card-2", "Session cookie dropped on Safari", None, Some("10337671931"), "t3").unwrap();
+        store.claim_work(&origin("card-2"), "basecamp-card-2", "Session cookie dropped on Safari", None, None, "t3").unwrap();
 
         let seen_by_first = store.open_work_of_others(&origin("card-1")).unwrap();
         assert_eq!(seen_by_first.len(), 1);
         assert_eq!(seen_by_first[0].title, "Session cookie dropped on Safari");
         assert_eq!(seen_by_first[0].project, None);
-        assert_eq!(seen_by_first[0].about.as_deref(), Some("10337671931"));
+        assert_eq!(seen_by_first[0].about.as_deref(), Some("10337671931"), "claiming again without saying what it is about keeps what it was about");
         assert_eq!(store.thread_working_on("10337671931").unwrap(), Some(("basecamp-card-2".to_string(), origin("card-2"))), "what is said on that to-do is card-2's to hear");
         assert_eq!(store.thread_working_on("1").unwrap(), None);
         assert_eq!(store.origin_of_thread("basecamp-card-2").unwrap(), Some(origin("card-2")));

@@ -119,6 +119,9 @@ impl Hand {
 
     pub fn work(&mut self, brief: &str, outside: &Outside, started: &Started) -> Result<String> {
         self.asked.push(brief.to_string());
+        if self.session.is_some() {
+            claude::refresh_hand_login(&self.directory.join("profile"))?;
+        }
         let sandbox = Sandbox {
             project: self.project.clone(),
             profile: self.directory.join("profile"),
