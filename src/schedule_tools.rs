@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use crate::broker::Tool;
+use crate::broker::{Tool, text_of};
 use crate::clock;
 use crate::conversation::{Origin, Standing};
 use crate::logs;
@@ -110,7 +110,7 @@ impl Tool for Schedule {
     }
 
     fn call(&self, arguments: &Value) -> Result<String> {
-        let task = arguments["task"].as_str().filter(|it| !it.trim().is_empty()).context("task is required")?;
+        let task = text_of(arguments, "task")?;
         let store = Store::open_at(&self.database)?;
         if store.schedules_of(&self.origin)?.len() >= MOST_PER_CONVERSATION {
             bail!("this conversation already has {MOST_PER_CONVERSATION} schedules; cancel one first");

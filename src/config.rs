@@ -41,13 +41,14 @@ pub struct Config {
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub rotate_accounts: bool,
     /// How long one run of a hand or a reviewer may take before it is
-    /// stopped.
-    #[serde(default = "an_hour")]
+    /// stopped. A discarded hand is an hour of work nobody ever hears
+    /// about, so this is set for the long jobs, not the common ones.
+    #[serde(default = "three_hours")]
     pub minutes_per_run: u64,
     /// How long one turn of a thread may take. Longer than a hand's: a
     /// thread spends most of a turn waiting on its hands and their reviews,
     /// and cut off at a hand's limit it would take the hand at work with it.
-    #[serde(default = "three_hours")]
+    #[serde(default = "six_hours")]
     pub minutes_per_thread_turn: u64,
 }
 
@@ -57,6 +58,10 @@ fn an_hour() -> u64 {
 
 fn three_hours() -> u64 {
     3 * an_hour()
+}
+
+fn six_hours() -> u64 {
+    2 * three_hours()
 }
 
 fn anna() -> String {
@@ -80,8 +85,8 @@ impl Default for Config {
             people: BTreeMap::new(),
             jev_url: None,
             rotate_accounts: true,
-            minutes_per_run: an_hour(),
-            minutes_per_thread_turn: three_hours(),
+            minutes_per_run: three_hours(),
+            minutes_per_thread_turn: six_hours(),
         }
     }
 }

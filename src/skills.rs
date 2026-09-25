@@ -17,7 +17,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::McpServer;
-use crate::mcp::{self, Server};
+use crate::mcp;
+use crate::mcp_server::Server;
 use crate::paths;
 
 const DESCRIBE: &str = "describe";
@@ -286,7 +287,7 @@ mod tests {
         assert!(written.starts_with("---\nname: basecamp-todos\ndescription: What every action of the basecamp_todos tool takes. Todos, todolists and todosets."));
         assert!(written.contains("\n---\n\n# basecamp_todos"));
         assert!(written.contains("- get_todo: Get a single todo by id"));
-        assert_eq!(description_of_written(&written).unwrap().starts_with("What every action"), true);
+        assert!(description_of_written(&written).unwrap().starts_with("What every action"));
     }
 
     fn description_of_written(written: &str) -> Option<String> {

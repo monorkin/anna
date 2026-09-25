@@ -40,6 +40,17 @@ pub const BROKER_INSIDE: &str = "/run/broker.sock";
 /// refuses anyway. Background shells stay: a hand can start the test suite
 /// and keep working while it runs.
 const DOES_ITS_OWN_WORK: [&str; 2] = ["CLAUDE_CODE_DISABLE_WORKFLOWS", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"];
+/// Told the tools themselves, so each fails at once with its own message
+/// instead of retrying against a proxy that refuses everything: a day of
+/// hands spent minutes at a time asking mise and yarn for the network.
+const WORKS_OFFLINE: [(&str, &str); 6] = [
+    ("CARGO_NET_OFFLINE", "true"),
+    ("MISE_OFFLINE", "1"),
+    ("YARN_ENABLE_OFFLINE_MODE", "1"),
+    ("npm_config_offline", "true"),
+    ("BUNDLE_FROZEN", "true"),
+    ("GIT_TERMINAL_PROMPT", "0"),
+];
 /// Where a session builds. Never the project's own target folder: that is
 /// often a link into a cache the sandbox can't see, and what a hand builds
 /// shouldn't land where the person's own builds are picked up from.
@@ -179,7 +190,7 @@ impl Sandbox<'_> {
             .args(["--setenv", "HTTPS_PROXY", "http://127.0.0.1:3128"])
             .args(["--setenv", "CARGO_TARGET_DIR", BUILD_INSIDE])
             .args(["--setenv", "CARGO_HOME", CARGO_INSIDE])
-            .args(["--setenv", "CARGO_NET_OFFLINE", "true"])
+            .args(WORKS_OFFLINE.iter().flat_map(|(name, value)| ["--setenv", name, value]))
             .args(DOES_ITS_OWN_WORK.iter().flat_map(|name| ["--setenv", name, "1"]))
             .args(["/usr/bin/bash", "-c", &inside(&self.services), "sandbox"]);
         command
@@ -352,6 +363,9 @@ mod tests {
         assert!(arguments.last().unwrap() == "sandbox" && arguments[arguments.len() - 2].contains("TCP-LISTEN:33380,fork,bind=127.0.0.1 UNIX-CONNECT:/run/service-0.sock"));
         assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "CARGO_TARGET_DIR" && it[2] == BUILD_INSIDE));
         assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "CLAUDE_CODE_DISABLE_WORKFLOWS" && it[2] == "1"));
+        for (name, value) in [("CARGO_NET_OFFLINE", "true"), ("MISE_OFFLINE", "1"), ("YARN_ENABLE_OFFLINE_MODE", "1"), ("npm_config_offline", "true")] {
+            assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == name && it[2] == value), "{name} tells its tool there is no network");
+        }
         assert!(!arguments.iter().any(|it| it == "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"), "a hand may run its tests in the background");
         let read_only = binds(&arguments, "--ro-bind");
         let config = format!("{git}/config");
@@ -545,6 +559,7 @@ mod tests {
         let output = sandbox.claude(Path::new("/usr/bin/bash")).args(["-c", &script]).output().unwrap();
         let said = String::from_utf8_lossy(&output.stdout);
         let _ = bridge.kill();
+        let _ = bridge.wait();
 
         assert!(said.contains("pid true"), "the crate built and ran offline:\n{said}\n{}", String::from_utf8_lossy(&output.stderr));
         assert!(said.contains("debug"), "and built into /build:\n{said}");

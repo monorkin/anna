@@ -21,10 +21,10 @@ pub fn event(name: &str, details: Value) {
     let path = paths::log_file();
     // Who wrote to her, which tools she called and what went wrong are
     // nobody else's to read
-    if let Some(directory) = path.parent() {
-        if paths::make_private_dir(directory).is_err() {
-            return;
-        }
+    if let Some(directory) = path.parent()
+        && paths::make_private_dir(directory).is_err()
+    {
+        return;
     }
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).mode(0o600).open(path) {
         // One write for the whole line: threads and processes log at once,
@@ -40,12 +40,14 @@ pub fn print(follow: bool, only: Option<&str>) -> anyhow::Result<()> {
     let mut reader = BufReader::new(File::open(paths::log_file())?);
     let look = Look { styled: prompt::styled_for_stdout(), only: only.map(String::from) };
     print_new_lines(&mut reader, &look)?;
+    if !follow {
+        return Ok(());
+    }
 
-    while follow {
+    loop {
         thread::sleep(Duration::from_millis(500));
         print_new_lines(&mut reader, &look)?;
     }
-    Ok(())
 }
 
 fn print_new_lines(reader: &mut BufReader<File>, look: &Look) -> anyhow::Result<()> {
@@ -93,10 +95,11 @@ impl Look {
         let mut details = entry["details"].as_object().cloned().unwrap_or_default();
         let who = WHO_KEYS.iter().find_map(|key| details.remove(*key)).and_then(|it| it.as_str().map(short_id)).unwrap_or_default();
 
-        if let Some(only) = &self.only {
-            if !who.contains(only.as_str()) && !line.contains(only.as_str()) {
-                return None;
-            }
+        if let Some(only) = &self.only
+            && !who.contains(only.as_str())
+            && !line.contains(only.as_str())
+        {
+            return None;
         }
 
         let rest = details

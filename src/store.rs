@@ -16,7 +16,7 @@ use std::path::Path;
 
 use crate::conversation::Origin;
 
-const MIGRATIONS: [&str; 3] = ["
+const MIGRATIONS: [&str; 5] = ["
     CREATE TABLE schedules (
         id INTEGER PRIMARY KEY,
         source TEXT NOT NULL,
@@ -59,6 +59,15 @@ const MIGRATIONS: [&str; 3] = ["
         said TEXT NOT NULL,
         queued TEXT NOT NULL
     );
+", "
+    CREATE TABLE opened (
+        source TEXT NOT NULL,
+        conversation TEXT NOT NULL,
+        opened TEXT NOT NULL,
+        PRIMARY KEY (source, conversation)
+    );
+", "
+    ALTER TABLE mail ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0;
 "];
 
 /// A turn that was asked for and not yet finished: what a stopped Anna
@@ -100,6 +109,10 @@ pub struct Mail {
     pub from_thread: String,
     pub to: Origin,
     pub body: String,
+    /// Whether it was sent from a turn a trusted person started. That turn
+    /// could have done the work itself, so its word carries to the thread
+    /// that owns the work — the same Anna, reading with the same care.
+    pub trusted: bool,
 }
 
 pub struct Store {
@@ -246,6 +259,30 @@ impl Store {
         Ok(turns)
     }
 
+    /// A conversation is opened the first time a trusted person speaks in
+    /// it, and stays opened. Anyone else is heard there and nowhere else, so
+    /// a reply on work she was given reaches her without the whole account
+    /// being able to hand her work.
+    pub fn open_conversation(&self, origin: &Origin, now: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO opened (source, conversation, opened) VALUES (?1, ?2, ?3)",
+            params![origin.source, origin.conversation, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn opened(&self, origin: &Origin) -> Result<bool> {
+        let opened = self
+            .connection
+            .query_row(
+                "SELECT 1 FROM opened WHERE source = ?1 AND conversation = ?2",
+                params![origin.source, origin.conversation],
+                |_| Ok(()),
+            )
+            .optional()?;
+        Ok(opened.is_some())
+    }
+
     /// One line per conversation: claiming again replaces what was claimed.
     pub fn claim_work(&self, origin: &Origin, thread: &str, title: &str, project: Option<&str>, now: &str) -> Result<()> {
         self.connection.execute(
@@ -265,6 +302,27 @@ impl Store {
             params![origin.source, origin.conversation, now],
         )?;
         Ok(finished > 0)
+    }
+
+    /// Everything still claimed, newest first — the whole board, for anyone
+    /// asking from outside a thread.
+    pub fn open_work(&self) -> Result<Vec<Work>> {
+        let mut statement = self.connection.prepare(
+            "SELECT source, conversation, thread, title, project, updated FROM work
+             WHERE status = 'open' ORDER BY updated DESC",
+        )?;
+        let work = statement
+            .query_map([], |row| {
+                Ok(Work {
+                    origin: Origin { source: row.get(0)?, conversation: row.get(1)? },
+                    thread: row.get(2)?,
+                    title: row.get(3)?,
+                    project: row.get(4)?,
+                    updated: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(work)
     }
 
     pub fn open_work_of_others(&self, origin: &Origin) -> Result<Vec<Work>> {
@@ -309,10 +367,10 @@ impl Store {
         Ok(threads)
     }
 
-    pub fn send_mail(&self, from_thread: &str, to: &Origin, body: &str, now: i64) -> Result<()> {
+    pub fn send_mail(&self, from_thread: &str, to: &Origin, body: &str, trusted: bool, now: i64) -> Result<()> {
         self.connection.execute(
-            "INSERT INTO mail (from_thread, to_source, to_conversation, body, sent) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![from_thread, to.source, to.conversation, body, now],
+            "INSERT INTO mail (from_thread, to_source, to_conversation, body, trusted, sent) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![from_thread, to.source, to.conversation, body, trusted, now],
         )?;
         Ok(())
     }
@@ -327,7 +385,7 @@ impl Store {
 
     pub fn undelivered_mail(&self) -> Result<Vec<Mail>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, from_thread, to_source, to_conversation, body FROM mail WHERE delivered IS NULL ORDER BY id",
+            "SELECT id, from_thread, to_source, to_conversation, body, trusted FROM mail WHERE delivered IS NULL ORDER BY id",
         )?;
         let mail = statement
             .query_map([], |row| {
@@ -336,6 +394,7 @@ impl Store {
                     from_thread: row.get(1)?,
                     to: Origin { source: row.get(2)?, conversation: row.get(3)? },
                     body: row.get(4)?,
+                    trusted: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -407,6 +466,19 @@ mod tests {
     }
 
     #[test]
+    fn a_conversation_stays_opened_once_a_trusted_person_spoke_in_it() {
+        let (store, directory) = store("opened");
+        assert!(!store.opened(&origin("card-1")).unwrap());
+
+        store.open_conversation(&origin("card-1"), "t1").unwrap();
+        store.open_conversation(&origin("card-1"), "t2").unwrap();
+        assert!(store.opened(&origin("card-1")).unwrap());
+        assert!(!store.opened(&origin("card-2")).unwrap());
+        assert!(!store.opened(&Origin { source: "terminal".to_string(), conversation: "card-1".to_string() }).unwrap(), "opened on one source, not every source");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn a_thread_sees_what_the_others_have_open_but_not_its_own() {
         let (store, directory) = store("work");
         store.claim_work(&origin("card-1"), "basecamp-card-1", "Login 500s on Safari", Some("frontdesk"), "t1").unwrap();
@@ -433,13 +505,14 @@ mod tests {
     #[test]
     fn mail_waits_until_it_is_delivered() {
         let (store, directory) = store("mail");
-        store.send_mail("basecamp-card-1", &origin("card-2"), "Same bug as mine, I'll take both.", 100).unwrap();
-        store.send_mail("basecamp-card-1", &origin("card-2"), "Fixed in 4f2a.", 200).unwrap();
+        store.send_mail("basecamp-card-1", &origin("card-2"), "Same bug as mine, I'll take both.", false, 100).unwrap();
+        store.send_mail("basecamp-card-1", &origin("card-2"), "Fixed in 4f2a.", true, 200).unwrap();
 
         assert_eq!(store.mail_sent_since("basecamp-card-1", 150).unwrap(), 1);
         let waiting = store.undelivered_mail().unwrap();
         assert_eq!(waiting.len(), 2);
         assert_eq!(waiting[0].to, origin("card-2"));
+        assert!(!waiting[0].trusted && waiting[1].trusted, "each carries the standing it was sent on");
 
         store.mark_delivered(waiting[0].id, 300).unwrap();
         assert_eq!(store.undelivered_mail().unwrap()[0].body, "Fixed in 4f2a.");

@@ -32,6 +32,14 @@ pub trait Tool: Send + Sync {
     fn call(&self, arguments: &Value) -> Result<String>;
 }
 
+/// A tool's string argument, which has to say something.
+pub fn text_of<'a>(arguments: &'a Value, name: &str) -> Result<&'a str> {
+    arguments[name]
+        .as_str()
+        .filter(|it| !it.trim().is_empty())
+        .with_context(|| format!("{name} is required"))
+}
+
 pub struct Endpoint {
     socket: PathBuf,
     closed: Arc<AtomicBool>,
