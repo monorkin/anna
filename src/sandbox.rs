@@ -73,6 +73,9 @@ pub struct Outside {
     pub proxy_socket: PathBuf,
     pub toolchains: Toolchains,
     pub time_limit: Duration,
+    /// Her git identity, when she has one of her own: what a hand's commits
+    /// are authored as. It carries no credential; a hand can't push.
+    pub gitconfig: Option<PathBuf>,
     /// Whether the user's systemd can be asked for a scope. With one, a
     /// session gets a ceiling on memory and on how many processes it may
     /// have, so a hand that forks without end or eats all the memory takes
@@ -154,6 +157,9 @@ impl Sandbox<'_> {
             .args(["--symlink", "usr/lib", "/lib"])
             .args(["--symlink", "usr/lib", "/lib64"])
             .args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/home/hand"]);
+        if let Some(gitconfig) = &self.outside.gitconfig {
+            command.arg("--ro-bind").arg(gitconfig).arg("/home/hand/.gitconfig");
+        }
 
         for certificates in ["/etc/ssl", "/etc/ca-certificates", "/etc/pki"] {
             if Path::new(certificates).exists() {
@@ -348,6 +354,7 @@ mod tests {
             proxy_socket: PathBuf::from("/run/anna/proxy.sock"),
             toolchains: Toolchains::default(),
             time_limit: Duration::from_secs(60),
+            gitconfig: None,
             scopes: false,
         };
         let arguments = arguments_of(&Sandbox {
@@ -423,6 +430,7 @@ mod tests {
             proxy_socket: root.join("proxy.sock"),
             toolchains: Toolchains::default(),
             time_limit: Duration::from_secs(60),
+            gitconfig: None,
             scopes: Outside::can_have_scopes(),
         };
         let build_dir = root.join("build");
@@ -486,6 +494,7 @@ mod tests {
             proxy_socket: root.join("proxy.sock"),
             toolchains: Toolchains::default(),
             time_limit: Duration::from_secs(60),
+            gitconfig: None,
             scopes: Outside::can_have_scopes(),
         };
         let run = |project: &Path, script: &str| {
@@ -570,7 +579,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        let outside = Outside { proxy_socket: root.join("proxy.sock"), toolchains, time_limit: Duration::from_secs(60), scopes: Outside::can_have_scopes() };
+        let outside = Outside { proxy_socket: root.join("proxy.sock"), toolchains, time_limit: Duration::from_secs(60), gitconfig: None, scopes: Outside::can_have_scopes() };
         let sandbox = Sandbox {
             project: project.clone(),
             profile: root.join("profile"),
@@ -601,6 +610,7 @@ mod tests {
             proxy_socket: PathBuf::from("/run/anna/proxy.sock"),
             toolchains: Toolchains::default(),
             time_limit: Duration::from_secs(60),
+            gitconfig: None,
             scopes: false,
         };
         let sandbox = |writable| Sandbox {
@@ -635,6 +645,7 @@ mod tests {
                 rust: None,
             },
             time_limit: Duration::from_secs(60),
+            gitconfig: Some(PathBuf::from("/home/someone/.config/anna/tools/gitconfig")),
             scopes: true,
         };
         let arguments = arguments_of(&Sandbox {
@@ -655,6 +666,7 @@ mod tests {
 
         assert_eq!(binds(&arguments, "--bind"), [("/data/reviews/r1/profile", "/profile"), ("/data/builds/abc", BUILD_INSIDE)]);
         assert!(binds(&arguments, "--ro-bind").contains(&(installs.to_str().unwrap(), installs.to_str().unwrap())));
+        assert!(binds(&arguments, "--ro-bind").contains(&("/home/someone/.config/anna/tools/gitconfig", "/home/hand/.gitconfig")), "her commits are authored as her");
         assert!(arguments.windows(3).any(|it| {
             it[0] == "--setenv" && it[1] == "PATH" && it[2] == "/home/someone/.local/share/mise/installs/ruby/3.4.7/bin:/usr/bin"
         }));

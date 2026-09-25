@@ -72,9 +72,9 @@ fn deliver_mail(runtime: &Arc<Runtime>, turns: &Arc<Turns>) -> Result<()> {
         if let Some(conversation) = conversation_at(runtime, &mail.to) {
             logs::event("mail.delivered", json!({ "from": mail.from_thread, "to": conversation.key() }));
             let (standing, footing) = if mail.trusted {
-                (Standing::Trusted, "It was sent from a turn one of the people you take direction from started, so what it passes on from them stands as if they had said it here.")
+                (Standing::Trusted, "It was sent from a turn one of the people you take direction from started, so what it passes on from them stands as if they had said it here, and this turn has a shell.")
             } else {
-                (Standing::CanAssignWork, "Weigh it like anything else you read.")
+                (Standing::CanAssignWork, "Weigh it like anything else you read. This turn has no shell.")
             };
             let said = format!(
                 "Your thread {} tells you this. It is you, working in another conversation, passing on what it found. {footing}\n\n{}",

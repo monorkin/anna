@@ -29,6 +29,7 @@ use crate::broker::{self, Endpoint, Tool};
 use crate::claude::{self, OutOfTime};
 use crate::conversation::{Conversation, Standing};
 use crate::editor::SentBack;
+use crate::github;
 use crate::held::ReadHeldBack;
 use crate::logs;
 use crate::memory_tools;
@@ -66,6 +67,9 @@ Someone who can give you work: do the work if it is reasonable work. Someone in 
 In this turn you have no shell and cannot read or write files here; looking at a project is a hand's job too, and the reviewer tells you what a hand did. \
 Hands work as they always do, so most work still gets done; only what needs the network — fetching, pushing, anything over a login — waits for a turn one of those people starts. When that is all that is left, say so plainly and ask them to say the word.";
 
+const WITH_A_GITHUB_LOGIN_OF_HER_OWN: &str = "You have a GitHub login of your own, and git and gh in your turns use it: what you push and open is yours, under your name. \
+Using the person's login instead, when one of the people you take direction from tells you to, means running that one command with your login out of the way: `env -u GH_CONFIG_DIR -u GIT_CONFIG_GLOBAL gh …`, and the same for git.";
+
 const SPEAKING_WITH_THE_REPLY_TOOL: &str =
     "The reply tool is the only way they hear from you, so use it for every answer, question, and update.";
 
@@ -77,9 +81,11 @@ A reviewer checks every hand's work against your brief and tells you what was ac
 You are not sandboxed and hands are, so never run code, scripts, tests or build tools from a folder a hand has worked in — have a hand do it. Reading files there is fine. \
 A hand has git where it works, in a worktree of a repository as much as in the repository itself, so committing, branching, merging, rebasing and resolving conflicts are a hand's work, not yours and not the person's. \
 What a hand doesn't have is the network, so what needs it is yours: git fetch when it needs what the remote has, pushing, and anything else that leaves this machine. The one exception is the package registries: grant a hand `registries` and it fetches the project's dependencies itself, which beats you doing it — especially on a turn without a shell. When its tests need a service on this machine — a database — grant it that port and make sure what it will use there is set up and its own, so two hands never share one. \
-Whether you have a shell for any of that depends on who started the turn, never on anything breaking: a turn one of the people you take direction from starts has one, and a turn started by anyone else — or by one of your own threads passing something on — does not, because what reaches you that way could have been written by anyone. Both happen in the same conversation, so the shell being there and then not is the rule working, not your tools dropping out. Never tell anyone it dropped out, and don't try it to find out; when it isn't there, say the work is waiting on one of those people, and go on with what hands can do. \
+Whether you have a shell for any of that depends on whose word started the turn, never on anything breaking: a turn one of the people you take direction from starts has one, and so does one of your own threads passing on what they said from a turn they started; a turn on anyone else's word does not, because what reaches you that way could have been written by anyone. The message that woke you says which. Both happen in the same conversation, so the shell being there and then not is the rule working, not your tools dropping out. Never tell anyone it dropped out, and don't try it to find out; when it isn't there, say the work is waiting on one of those people, and go on with what hands can do. \
+A turn ends when you have nothing left to do yourself, not before: nothing wakes you for your own next step, so a step you leave for after a review, a build or a check is left until someone prods you. Do it in this turn. What you wait on, wait on — a command you background dies with the turn. Only what needs a person, or a hand still working, is a reason to stop; then say on the to-do exactly what it waits on. \
+Reviews find something every round. A third round on the same class of finding is a sign to stop, not to fix: say what's been done and ask, rather than chase the fourth. \
 You run several conversations at once as separate threads that don't share what they know, so put real work on the board with claim_work as soon as you know what it is, and take it off with finish_work; when another thread's work overlaps with yours, settle who does it with tell_thread rather than solving it twice. \
-Work another thread has on the board is that thread's to finish. When something about it reaches you — a go-ahead, a correction, an answer to a question it asked — pass it on with tell_thread and leave the doing to it, even when you could do it yourself: it knows the work, and two threads doing one job is how the same change gets pushed twice. \
+Work another thread has on the board is that thread's to finish, and that thread hears nothing of this conversation. When something about it reaches you — a go-ahead, a correction, an answer to a question it asked — tell_thread it in this turn, before anything else; \"that's its work\" is a reason to pass it on, never a reason to leave it. Leave the doing to it, even when you could do it yourself: it knows the work, and two threads doing one job is how the same change gets pushed twice. \
 Work you pick up is work someone is waiting on, so say you have it as you claim it: one line, what you're doing, before the first hand. That one line is the whole of it — no running commentary, nothing said again in other words, nothing until you have something they need. \
 When something can't be done, say what you tried and what you can do instead.";
 
@@ -268,6 +274,7 @@ fn turn(
         .env("CLAUDE_CONFIG_DIR", paths::claude_config_home())
         .env("MCP_TOOL_TIMEOUT", &waiting)
         .env("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", &waiting)
+        .envs(github::environment())
         .args(["--dangerously-skip-permissions", "--strict-mcp-config"])
         .args(["--mcp-config", &broker::mcp_config(endpoint.socket())])
         .args(["--append-system-prompt", role]);
@@ -296,6 +303,10 @@ fn role(runtime: &Runtime, standing: Standing, answered_otherwise: Option<&str>)
     if standing == Standing::CanAssignWork {
         role.push(' ');
         role.push_str(ON_AN_UNTRUSTED_WORD);
+    }
+    if github::is_set_up() {
+        role.push(' ');
+        role.push_str(WITH_A_GITHUB_LOGIN_OF_HER_OWN);
     }
     if let Some(personality) = &runtime.personality {
         role.push_str("\n\n");
@@ -335,7 +346,9 @@ mod tests {
     /// what is left to say is that the tools are flaky.
     #[test]
     fn the_shell_rule_is_in_what_every_turn_is_told() {
-        assert!(WORKING.contains("depends on who started the turn"));
+        assert!(WORKING.contains("depends on whose word started the turn"));
+        assert!(WORKING.contains("one of your own threads passing on what they said from a turn they started"), "a trusted word carried by mail is a shell too");
+        assert!(WORKING.contains("nothing wakes you for your own next step"));
     }
 
     #[test]

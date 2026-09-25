@@ -11,6 +11,7 @@ mod deadline;
 mod dispatcher;
 mod editor;
 mod fsutil;
+mod github;
 mod hand;
 mod held;
 mod judge;
@@ -138,12 +139,27 @@ enum Command {
         #[usage(subcommand)]
         command: ClaudeCommand,
     },
+    /// Anna's own GitHub login, kept apart from yours
+    Github {
+        #[usage(subcommand)]
+        command: GithubCommand,
+    },
 }
 
 #[derive(Subcommands)]
 enum SourceCommand {
     /// Read a source once and show what Anna would make of it, without acting on anything
     Check { name: String },
+}
+
+#[derive(Subcommands)]
+enum GithubCommand {
+    /// Log Anna's own GitHub folder in, in the browser; her turns push and open pull requests as that account
+    Login {
+        /// The email that account uses, so commits are credited to it; kept from last time when left out
+        #[usage(long)]
+        email: Option<String>,
+    },
 }
 
 #[derive(Subcommands)]
@@ -268,6 +284,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::Memory { command } => katami::cli::run(katami::cli::Cli {
             command: katami::cli::Command::Memory { command },
         }),
+        Command::Github { command } => match command {
+            GithubCommand::Login { email } => github_login(email),
+        },
         Command::Claude { command } => match command {
             ClaudeCommand::Login => claude::log_in(),
             ClaudeCommand::Account { command } => ax::cli::run(ax::cli::Cli {
@@ -282,4 +301,18 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
     }
+}
+
+/// Her commits are credited to the account by its email, so the login isn't
+/// finished without one: given here, or kept from the last time.
+fn github_login(email: Option<String>) -> Result<()> {
+    let login = github::log_in()?;
+    match email.or_else(github::email) {
+        Some(email) => {
+            github::set_identity(&config::Config::load()?.name, &email)?;
+            println!("Logged in as {login}. Her turns push and open pull requests as that account, with commits by {email}.");
+        }
+        None => println!("Logged in as {login}, but without an email its commits are credited to nobody: run this again with --email <the account's address>."),
+    }
+    Ok(())
 }

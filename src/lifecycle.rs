@@ -73,6 +73,9 @@ pub fn status() -> Result<()> {
             let status = &answer["status"];
             println!("Anna has been running since {}, as process {}.", text(&status["since"]), status["process"]);
             println!("Working as: {}", text(&status["claude_login"]));
+            if let Some(login) = status["github_login"].as_str() {
+                println!("On GitHub as: {login}");
+            }
             println!("Listening on: {}", names(&status["sources"]));
             match status["going_on"].as_array() {
                 Some(turns) => {

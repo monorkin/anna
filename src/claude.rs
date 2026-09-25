@@ -325,6 +325,11 @@ pub fn login() -> String {
     }
 }
 
+/// How long one shell command of hers may run: a code review or a test
+/// suite takes longer than Claude Code's ten minutes, and a wait that is
+/// cut off is a turn that ends with the work still running.
+const LONGEST_COMMAND_MS: &str = "3600000";
+
 /// What a commit or a pull request says is hers to say: Claude Code's own
 /// co-author trailer, "made with" line and session link are all turned off,
 /// in her folder and in every hand's. Whatever else is set there stays.
@@ -332,6 +337,7 @@ pub fn write_settings(home: &Path) -> Result<()> {
     let path = home.join("settings.json");
     let mut settings = if path.exists() { read_json(&path)? } else { json!({}) };
     settings["attribution"] = json!({ "commit": "", "pr": "", "sessionUrl": false });
+    settings["env"]["BASH_MAX_TIMEOUT_MS"] = json!(LONGEST_COMMAND_MS);
     fs::write(&path, serde_json::to_string_pretty(&settings)?).with_context(|| format!("could not write {}", path.display()))
 }
 
@@ -397,10 +403,12 @@ mod tests {
         let written: Value = read_json(&home.join("settings.json")).unwrap();
         assert_eq!(written["attribution"], json!({ "commit": "", "pr": "", "sessionUrl": false }));
 
-        fs::write(home.join("settings.json"), r#"{"theme":"dark","attribution":{"commit":"Co-authored-by: Claude"}}"#).unwrap();
+        fs::write(home.join("settings.json"), r#"{"theme":"dark","env":{"FOO":"1"},"attribution":{"commit":"Co-authored-by: Claude"}}"#).unwrap();
         write_settings(&home).unwrap();
         let written: Value = read_json(&home.join("settings.json")).unwrap();
         assert_eq!(written["theme"], "dark", "what else is set there stays");
+        assert_eq!(written["env"]["FOO"], "1");
+        assert_eq!(written["env"]["BASH_MAX_TIMEOUT_MS"], "3600000", "a review or a test suite can be waited for");
         assert_eq!(written["attribution"]["commit"], "");
         assert_eq!(written["attribution"]["sessionUrl"], false);
         fs::remove_dir_all(home).unwrap();

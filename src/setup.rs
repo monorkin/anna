@@ -78,6 +78,13 @@ pub trait Doing {
     fn jev_key_works(&mut self, key: &str) -> bool;
     fn keep_secret(&mut self, name: &str, value: &str) -> Result<Kept>;
     fn install_service(&mut self, agent: &str) -> Result<()>;
+    /// The GitHub login of her own she already has, if any.
+    fn github_login(&mut self) -> Option<String>;
+    fn git_email(&mut self) -> Option<String>;
+    /// Hands the terminal to gh until her own folder is logged in; answers
+    /// with the login.
+    fn log_in_to_github(&mut self) -> Result<String>;
+    fn set_git_identity(&mut self, name: &str, email: &str) -> Result<()>;
     /// Who the tool's command line is logged in as, for the confirm question.
     fn logged_in_as(&mut self, tool: &str) -> Vec<String>;
     /// The profiles the tool's command line has, when it has profiles.
@@ -141,6 +148,9 @@ impl Wizard<'_> {
 
         self.run_at_startup(&agent)?;
         self.jev(&agent)?;
+        if self.doing.has_program("gh") {
+            self.github(&agent)?;
+        }
         for tool in &TOOLS {
             if self.doing.has_program(tool.program) {
                 self.tool(tool, &agent)?;
@@ -236,6 +246,46 @@ impl Wizard<'_> {
             self.asking.trouble("Jev refused that key. Try again, or enter to skip.")?;
         }
         self.asking.done("No key changed.")
+    }
+
+    /// A GitHub account of her own, so what she pushes and opens is hers
+    /// and not the person's. The login is gh's to do; setup then writes the
+    /// identity her commits carry, which needs the account's email.
+    fn github(&mut self, agent: &str) -> Result<()> {
+        let already = self.doing.github_login();
+        let question = format!("Do you want {agent} to have a GitHub login of its own?");
+        let hint = format!("{agent} then pushes and opens pull requests as that account instead of as you. Make the account first, and give it access to the repositories {agent} works in.");
+        if !self.asking.yes(&Question { title: "GitHub", question: &question, hint: &hint }, already.is_some())? {
+            return self.asking.done(&format!("{agent} pushes nothing on its own; when you tell it to use your login, it does."));
+        }
+
+        let login = match already {
+            Some(login) => {
+                self.asking.done(&format!("Already logged in as {login}."))?;
+                login
+            }
+            None => {
+                self.asking.note("\n  gh takes it from here: approve the login in the browser and come back.\n")?;
+                match self.doing.log_in_to_github() {
+                    Ok(login) => login,
+                    Err(error) => return self.asking.trouble(&format!("Couldn't log in: {error:#}. Nothing was changed; run setup again to retry.")),
+                }
+            }
+        };
+
+        let current = self.doing.git_email();
+        let email_question = Question {
+            title: "GitHub email",
+            question: "Which email address does that account use?",
+            hint: "GitHub credits commits to the account by it.",
+        };
+        match self.asking.string(&email_question, current.as_deref())?.or(current) {
+            Some(email) => {
+                self.doing.set_git_identity(agent, &email)?;
+                self.asking.done(&format!("{agent} pushes and opens pull requests as {login}, with commits by {email}."))
+            }
+            None => self.asking.trouble(&format!("Without an email, {agent}'s commits are credited to nobody. Run setup again, or `anna github login --email <address>`.")),
+        }
     }
 
     fn closing_notes(&mut self, agent: &str) -> Result<()> {
@@ -397,6 +447,8 @@ mod tests {
         sources: Vec<(String, Source)>,
         watches: bool,
         profiles: Vec<&'static str>,
+        github_login: Option<String>,
+        git_identity: Option<(String, String)>,
     }
 
     impl Doing for Pretend {
@@ -432,6 +484,24 @@ mod tests {
 
         fn install_service(&mut self, agent: &str) -> Result<()> {
             self.service = Some(agent.to_string());
+            Ok(())
+        }
+
+        fn github_login(&mut self) -> Option<String> {
+            self.github_login.clone()
+        }
+
+        fn git_email(&mut self) -> Option<String> {
+            self.git_identity.as_ref().map(|(_, email)| email.clone())
+        }
+
+        fn log_in_to_github(&mut self) -> Result<String> {
+            self.github_login = Some("botten-agent".to_string());
+            Ok("botten-agent".to_string())
+        }
+
+        fn set_git_identity(&mut self, name: &str, email: &str) -> Result<()> {
+            self.git_identity = Some((name.to_string(), email.to_string()));
             Ok(())
         }
 
@@ -562,6 +632,29 @@ mod tests {
         assert!(!asking.asked.iter().any(|it| it.contains("Fizzy")), "fizzy isn't installed, so it isn't offered");
 
         std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn a_github_login_of_her_own_is_made_at_setup_and_kept_after() {
+        let mut asking = Scripted::answering(&[
+            "Botten", "", "", "n", "n",   // name, about, style, no service, no Jev
+            "y", "botten@example.com",    // GitHub, and the account's email
+        ]);
+        let mut doing = Pretend { installed: vec!["gh"], ..Pretend::default() };
+        walk(&mut asking, &mut doing, "github");
+        assert_eq!(doing.github_login.as_deref(), Some("botten-agent"));
+        assert_eq!(doing.git_identity, Some(("Botten".to_string(), "botten@example.com".to_string())));
+        assert!(asking.said.iter().any(|it| it.contains("as botten-agent, with commits by botten@example.com")), "{:?}", asking.said);
+
+        let mut again = Scripted::answering(&["Botten", "", "", "n", "n", "", ""]);
+        walk(&mut again, &mut doing, "github-again");
+        assert_eq!(doing.git_identity, Some(("Botten".to_string(), "botten@example.com".to_string())), "enter keeps the login and the email");
+        assert!(again.said.iter().any(|it| it.contains("Already logged in as botten-agent")));
+
+        let mut without_gh = Scripted::answering(&["Botten", "", "", "n", "n"]);
+        let mut nothing = Pretend::default();
+        walk(&mut without_gh, &mut nothing, "github-without");
+        assert!(!without_gh.asked.iter().any(|it| it.contains("GitHub")), "no gh, no question");
     }
 
     #[test]

@@ -16,6 +16,7 @@ use crate::at_work::AtWork;
 use crate::claude;
 use crate::config::{self, Config};
 use crate::editor::Editor;
+use crate::github;
 use crate::judge::Judge;
 use crate::logs;
 use crate::mcp::Catalog;
@@ -64,6 +65,7 @@ impl Runtime {
             proxy_socket: proxy.socket().to_path_buf(),
             toolchains: Toolchains::discover(),
             time_limit: Duration::from_secs(config.minutes_per_run * 60),
+            gitconfig: github::is_set_up().then(github::gitconfig),
             scopes: Outside::can_have_scopes(),
         });
         if !outside.scopes {

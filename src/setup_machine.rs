@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
 
 use crate::config::{self, Config, Source};
+use crate::github;
 use crate::judge::Judge;
 use crate::mcp_cli;
 use crate::paths;
@@ -48,6 +49,22 @@ impl Doing for Machine {
 
     fn install_service(&mut self, agent: &str) -> Result<()> {
         service::install(agent, true)
+    }
+
+    fn github_login(&mut self) -> Option<String> {
+        github::login()
+    }
+
+    fn git_email(&mut self) -> Option<String> {
+        github::email()
+    }
+
+    fn log_in_to_github(&mut self) -> Result<String> {
+        github::log_in()
+    }
+
+    fn set_git_identity(&mut self, name: &str, email: &str) -> Result<()> {
+        github::set_identity(name, email)
     }
 
     fn profiles(&mut self, tool: &str) -> Vec<Profile> {
