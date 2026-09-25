@@ -40,16 +40,15 @@ pub const BROKER_INSIDE: &str = "/run/broker.sock";
 /// refuses anyway. Background shells stay: a hand can start the test suite
 /// and keep working while it runs.
 const DOES_ITS_OWN_WORK: [&str; 2] = ["CLAUDE_CODE_DISABLE_WORKFLOWS", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"];
-/// Told the tools themselves, so each fails at once with its own message
-/// instead of retrying against a proxy that refuses everything: a day of
-/// hands spent minutes at a time asking mise and yarn for the network.
-const WORKS_OFFLINE: [(&str, &str); 6] = [
+/// Told the package managers themselves, so each fails at once with its own
+/// message instead of retrying against a proxy that refuses everything: a
+/// day of hands spent minutes at a time asking mise and yarn for the network.
+const WORKS_OFFLINE: [(&str, &str); 5] = [
     ("CARGO_NET_OFFLINE", "true"),
     ("MISE_OFFLINE", "1"),
     ("YARN_ENABLE_OFFLINE_MODE", "1"),
     ("npm_config_offline", "true"),
     ("BUNDLE_FROZEN", "true"),
-    ("GIT_TERMINAL_PROMPT", "0"),
 ];
 /// Where a session builds. Never the project's own target folder: that is
 /// often a link into a cache the sandbox can't see, and what a hand builds
@@ -135,6 +134,10 @@ pub struct Sandbox<'outside> {
     /// the second one doesn't compile the world again.
     pub build_dir: PathBuf,
     pub services: Vec<Service>,
+    /// A proxy of this session's own that also lets it at the package
+    /// registries. With one, the package managers aren't told they are
+    /// offline, because they aren't.
+    pub registries: Option<PathBuf>,
 }
 
 impl Sandbox<'_> {
@@ -171,7 +174,7 @@ impl Sandbox<'_> {
             .arg(&self.build_dir)
             .arg(BUILD_INSIDE)
             .arg("--ro-bind")
-            .arg(&self.outside.proxy_socket)
+            .arg(self.registries.as_ref().unwrap_or(&self.outside.proxy_socket))
             .arg("/run/proxy.sock");
         if let Some(broker_socket) = &self.broker_socket {
             command.arg("--ro-bind").arg(broker_socket).arg(BROKER_INSIDE);
@@ -190,7 +193,11 @@ impl Sandbox<'_> {
             .args(["--setenv", "HTTPS_PROXY", "http://127.0.0.1:3128"])
             .args(["--setenv", "CARGO_TARGET_DIR", BUILD_INSIDE])
             .args(["--setenv", "CARGO_HOME", CARGO_INSIDE])
-            .args(WORKS_OFFLINE.iter().flat_map(|(name, value)| ["--setenv", name, value]))
+            .args(["--setenv", "GIT_TERMINAL_PROMPT", "0"]);
+        if self.registries.is_none() {
+            command.args(WORKS_OFFLINE.iter().flat_map(|(name, value)| ["--setenv", name, value]));
+        }
+        command
             .args(DOES_ITS_OWN_WORK.iter().flat_map(|name| ["--setenv", name, "1"]))
             .args(["/usr/bin/bash", "-c", &inside(&self.services), "sandbox"]);
         command
@@ -351,6 +358,7 @@ mod tests {
             writable: true,
             build_dir: PathBuf::from("/data/builds/abc"),
             services: vec![Service { port: 33380, socket: PathBuf::from("/run/anna/service-h1-0.sock") }],
+            registries: None,
         });
 
         assert!(arguments.contains(&"--unshare-all".to_string()));
@@ -366,6 +374,21 @@ mod tests {
         for (name, value) in [("CARGO_NET_OFFLINE", "true"), ("MISE_OFFLINE", "1"), ("YARN_ENABLE_OFFLINE_MODE", "1"), ("npm_config_offline", "true")] {
             assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == name && it[2] == value), "{name} tells its tool there is no network");
         }
+        assert!(binds(&arguments, "--ro-bind").contains(&("/run/anna/proxy.sock", "/run/proxy.sock")));
+
+        let with_registries = arguments_of(&Sandbox {
+            project: project.clone(),
+            profile: PathBuf::from("/data/hands/h1/profile"),
+            outside: &outside,
+            broker_socket: None,
+            writable: true,
+            build_dir: PathBuf::from("/data/builds/abc"),
+            services: Vec::new(),
+            registries: Some(PathBuf::from("/run/anna/proxy-h1.sock")),
+        });
+        assert!(binds(&with_registries, "--ro-bind").contains(&("/run/anna/proxy-h1.sock", "/run/proxy.sock")), "its own proxy stands in for the shared one");
+        assert!(!with_registries.iter().any(|it| it == "MISE_OFFLINE" || it == "CARGO_NET_OFFLINE"), "the package managers aren't told they are offline");
+        assert!(with_registries.windows(3).any(|it| it[0] == "--setenv" && it[1] == "GIT_TERMINAL_PROMPT" && it[2] == "0"), "git still never asks for a login");
         assert!(!arguments.iter().any(|it| it == "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"), "a hand may run its tests in the background");
         let read_only = binds(&arguments, "--ro-bind");
         let config = format!("{git}/config");
@@ -413,6 +436,7 @@ mod tests {
                 writable: true,
                 build_dir: build_dir.clone(),
                 services: Vec::new(),
+                registries: None,
             };
             let output = sandbox.claude(Path::new("/usr/bin/bash")).args(["-c", script]).env("ANNA_TEST_SECRET", "s3cret").output().unwrap();
             String::from_utf8_lossy(&output.stdout).into_owned()
@@ -473,6 +497,7 @@ mod tests {
                 writable: true,
                 build_dir: root.join("build"),
                 services: Vec::new(),
+                registries: None,
             };
             let output = sandbox.claude(Path::new("/usr/bin/bash")).args(["-c", script]).output().unwrap();
             format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
@@ -554,6 +579,7 @@ mod tests {
             writable: true,
             build_dir: root.join("build"),
             services: vec![Service { port, socket: socket.clone() }],
+            registries: None,
         };
         let script = format!("cargo run -q 2>&1; ls /build | head -1; echo | socat - TCP:127.0.0.1:{port}; cat ~/.cargo/credentials.toml 2>/dev/null && echo LEAKED");
         let output = sandbox.claude(Path::new("/usr/bin/bash")).args(["-c", &script]).output().unwrap();
@@ -585,6 +611,7 @@ mod tests {
             writable,
             build_dir: PathBuf::from("/data/builds/abc"),
             services: Vec::new(),
+            registries: None,
         };
 
         let hand: Vec<&str> = sandbox(true).tools().split(',').collect();
@@ -618,6 +645,7 @@ mod tests {
             writable: false,
             build_dir: PathBuf::from("/data/builds/abc"),
             services: Vec::new(),
+            registries: None,
         });
 
         let bwrap = arguments.iter().position(|it| it == "bwrap").expect("with a scope to be had, bwrap runs inside one");

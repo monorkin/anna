@@ -19,6 +19,23 @@ use crate::paths;
 
 pub const CLAUDE_API: &str = "api.anthropic.com:443";
 
+/// Where the package managers fetch from: public, read-only, and no login
+/// involved, so a hand can be let at them from any turn. What a day of
+/// refusals showed hands asking for, plus each manager's other hosts.
+pub const REGISTRIES: [&str; 11] = [
+    "rubygems.org:443",
+    "index.rubygems.org:443",
+    "registry.npmjs.org:443",
+    "registry.yarnpkg.com:443",
+    "crates.io:443",
+    "index.crates.io:443",
+    "static.crates.io:443",
+    "pypi.org:443",
+    "files.pythonhosted.org:443",
+    "mise-versions.jdx.dev:443",
+    "nodejs.org:443",
+];
+
 pub struct Proxy {
     socket: PathBuf,
 }

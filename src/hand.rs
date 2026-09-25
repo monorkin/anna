@@ -18,6 +18,7 @@ use crate::claude::{self, Started};
 use crate::clock;
 use crate::logs;
 use crate::paths;
+use crate::proxy::{self, Proxy};
 use crate::sandbox::{self, Outside, Sandbox, Service};
 use crate::transcripts;
 
@@ -30,6 +31,9 @@ pub struct Hand {
     granted: Option<Endpoint>,
     services: Vec<Service>,
     bridges: Vec<Child>,
+    /// A proxy of its own when it may fetch from the package registries;
+    /// otherwise it shares the one that reaches Claude and nothing else.
+    registries: Option<Proxy>,
     asked: Vec<String>,
     rejections: u32,
 }
@@ -40,8 +44,9 @@ impl Hand {
     /// and talk to Claude, nothing more. `ports` are services on this
     /// machine's loopback the hand may reach — a database for its tests —
     /// and only loopback: anything further is the network, which a hand
-    /// doesn't have.
-    pub fn start(project: &Path, grant: Vec<Box<dyn Tool>>, ports: &[u16]) -> Result<Hand> {
+    /// doesn't have, except the package registries when `registries` says
+    /// so.
+    pub fn start(project: &Path, grant: Vec<Box<dyn Tool>>, ports: &[u16], registries: bool) -> Result<Hand> {
         let project = project
             .canonicalize()
             .with_context(|| format!("{} does not exist", project.display()))?;
@@ -62,8 +67,14 @@ impl Hand {
             Some(Endpoint::open(&paths::socket(&format!("hand-{id}")), grant)?)
         };
         let (services, bridges) = bridge(&id, ports)?;
+        let registries = if registries {
+            let allowed = [&[proxy::CLAUDE_API], proxy::REGISTRIES.as_slice()].concat();
+            Some(Proxy::start(&paths::socket(&format!("proxy-{id}")), &allowed)?)
+        } else {
+            None
+        };
 
-        logs::event("hand.started", json!({ "hand": id, "project": project, "grant": granted_names, "services": ports }));
+        logs::event("hand.started", json!({ "hand": id, "project": project, "grant": granted_names, "services": ports, "registries": registries.is_some() }));
         Ok(Hand {
             id,
             project,
@@ -73,6 +84,7 @@ impl Hand {
             granted,
             services,
             bridges,
+            registries,
             asked: Vec::new(),
             rejections: 0,
         })
@@ -115,11 +127,12 @@ impl Hand {
             writable: true,
             build_dir: self.build_dir.clone(),
             services: self.services.clone(),
+            registries: self.registries.as_ref().map(|it| it.socket().to_path_buf()),
         };
 
         let mut command = sandbox.claude(&claude::binary()?);
         command.args(["--dangerously-skip-permissions", "--strict-mcp-config", "--tools", sandbox.tools()]);
-        command.args(["--append-system-prompt", &what_it_can_reach(&self.services)]);
+        command.args(["--append-system-prompt", &what_it_can_reach(&self.services, self.registries.is_some())]);
         if self.granted.is_some() {
             command.args(["--mcp-config", &broker::mcp_config(Path::new(sandbox::BROKER_INSIDE))]);
         }
@@ -189,7 +202,12 @@ fn bridge(hand: &str, ports: &[u16]) -> Result<(Vec<Service>, Vec<Child>)> {
 /// What a hand can reach, said before it starts. Without this, a database
 /// its thread didn't bridge in looks to it like a database that is down, and
 /// it reports the machine as broken instead of saying what it wasn't given.
-pub fn what_it_can_reach(services: &[Service]) -> String {
+pub fn what_it_can_reach(services: &[Service], registries: bool) -> String {
+    let network = if registries {
+        "no network beyond the package registries — rubygems, npm, crates.io, PyPI, mise's version list and nodejs.org — so fetching the project's dependencies works and nothing else out there does."
+    } else {
+        "no network at all."
+    };
     let reachable = match services {
         [] => "Nothing of this machine's own is reachable from in here.".to_string(),
         services => format!(
@@ -199,7 +217,7 @@ pub fn what_it_can_reach(services: &[Service]) -> String {
     };
 
     format!(
-        "You work in a sandbox: this project folder, the languages installed here, and no network at all. {reachable} \
+        "You work in a sandbox: this project folder, the languages installed here, and {network} {reachable} \
          Anything else you can't reach was never given to you rather than being broken or down — don't try to start it, install it or work around it, and say in your report what you couldn't reach and what it cost."
     )
 }
@@ -240,10 +258,11 @@ mod tests {
             Service { port: 6379, socket: PathBuf::from("/run/anna/service-h1-1.sock") },
         ];
 
-        let told = what_it_can_reach(&granted);
+        let told = what_it_can_reach(&granted, false);
         assert!(told.contains("you can reach port 33380 and port 6379"), "{told}");
-        assert!(told.contains("was never given to you rather than being broken"));
-        assert!(what_it_can_reach(&[]).contains("Nothing of this machine's own is reachable"));
+        assert!(told.contains("no network at all") && told.contains("was never given to you rather than being broken"));
+        let alone = what_it_can_reach(&[], true);
+        assert!(alone.contains("Nothing of this machine's own is reachable") && alone.contains("no network beyond the package registries"));
     }
 
     #[test]

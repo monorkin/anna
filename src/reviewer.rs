@@ -47,10 +47,12 @@ pub fn review(hand: &Hand, brief: &str, report: &str, outside: &Outside, started
         writable: false,
         build_dir: hand.build_dir().to_path_buf(),
         services: hand.services().to_vec(),
+        // It reads what the hand did; it fetches nothing
+        registries: None,
     };
     let mut command = sandbox.claude(&claude::binary()?);
     command.args(["--dangerously-skip-permissions", "--strict-mcp-config", "--tools", sandbox.tools()]);
-    command.args(["--append-system-prompt", &hand::what_it_can_reach(hand.services())]);
+    command.args(["--append-system-prompt", &hand::what_it_can_reach(hand.services(), false)]);
 
     let outcome = claude::reply_of(&mut command, &prompt(brief, report), outside.time_limit, Some(started));
     transcripts::keep(&directory.join("profile"), hand_id, true);
