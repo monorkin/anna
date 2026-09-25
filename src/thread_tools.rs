@@ -10,7 +10,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::broker::Tool;
+use crate::at_work::AtWork;
+use crate::broker::{Tool, text_of};
 use crate::claude::Started;
 use crate::conversation::{Conversation, Standing};
 use crate::editor::{Editor, SentBack};
@@ -231,6 +232,9 @@ pub struct Workshop {
     pub judge: Arc<Judge>,
     pub outside: Arc<Outside>,
     pub held: Arc<HeldBack>,
+    pub at_work: Arc<AtWork>,
+    /// Which turn's picture a hand started here belongs in.
+    pub conversation: String,
 }
 
 impl Workshop {
@@ -240,9 +244,11 @@ impl Workshop {
     fn round(&self, mut hand: Hand, ask: &str) -> Result<String> {
         let id = hand.id().to_string();
         let started = &self.hands.started;
+        self.at_work.hand_began(&self.conversation, &id, &hand.project().to_string_lossy());
         let outcome = hand
             .work(ask, &self.outside, started)
             .and_then(|report| reviewer::review(&hand, &hand.asked(), &report, &self.outside, started));
+        self.at_work.hand_ended(&self.conversation, &id);
 
         match outcome {
             Ok(_) if started.is_over() => {
@@ -293,13 +299,6 @@ impl Workshop {
             told
         }
     }
-}
-
-fn text_of<'a>(arguments: &'a Value, name: &str) -> Result<&'a str> {
-    arguments[name]
-        .as_str()
-        .filter(|it| !it.trim().is_empty())
-        .with_context(|| format!("{name} is required"))
 }
 
 #[cfg(test)]

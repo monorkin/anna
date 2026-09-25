@@ -74,7 +74,15 @@ pub fn status() -> Result<()> {
             println!("Anna has been running since {}, as process {}.", text(&status["since"]), status["process"]);
             println!("Working as: {}", text(&status["claude_login"]));
             println!("Listening on: {}", names(&status["sources"]));
-            println!("Conversations going on: {}", status["conversations"]);
+            match status["going_on"].as_array() {
+                Some(turns) => {
+                    print_going_on(turns);
+                    print_board(&status["board"]);
+                }
+                // An Anna started before this build knows the count and
+                // nothing else; saying nothing is going on would be a guess
+                None => println!("Conversations going on: {}", status["conversations"]),
+            }
         }
         Err(_) => println!("Anna isn't running."),
     }
@@ -82,17 +90,16 @@ pub fn status() -> Result<()> {
 }
 
 pub fn poke(source: Option<&str>) -> Result<()> {
-    let answer = control::ask(json!({ "command": "poke", "source": source }))?;
-    if answer["ok"].as_bool().unwrap_or(false) {
-        println!("{}", text(&answer["message"]));
-        Ok(())
-    } else {
-        bail!("{}", text(&answer["message"]))
-    }
+    answered(control::ask(json!({ "command": "poke", "source": source }))?)
 }
 
 pub fn tell(thread: &str, message: &str) -> Result<()> {
-    let answer = control::ask(json!({ "command": "tell", "thread": thread, "message": message }))?;
+    answered(control::ask(json!({ "command": "tell", "thread": thread, "message": message }))?)
+}
+
+/// What a running Anna said back: printed when she did it, an error when she
+/// couldn't.
+fn answered(answer: serde_json::Value) -> Result<()> {
     if answer["ok"].as_bool().unwrap_or(false) {
         println!("{}", text(&answer["message"]));
         Ok(())
@@ -135,6 +142,50 @@ fn wait_until(condition: impl Fn() -> bool) -> bool {
         thread::sleep(Duration::from_millis(250));
     }
     condition()
+}
+
+fn print_going_on(turns: &[serde_json::Value]) {
+    if turns.is_empty() {
+        println!("\nNothing going on right now.");
+        return;
+    }
+
+    println!("\nGoing on right now:");
+    for turn in turns {
+        println!("  {} for {}{}", text(&turn["conversation"]), text(&turn["for"]), behind(&turn["waiting"]));
+        if let Some(doing) = turn["doing"].as_str() {
+            println!("      {doing}");
+        }
+        for hand in turn["hands"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            println!(
+                "      hand {} in {}, {}",
+                text(&hand["hand"]),
+                text(&hand["project"]),
+                text(&hand["for"])
+            );
+        }
+    }
+}
+
+fn print_board(board: &serde_json::Value) {
+    let claimed = board.as_array().map(Vec::as_slice).unwrap_or_default();
+    if claimed.is_empty() {
+        return;
+    }
+
+    println!("\nClaimed, between turns:");
+    for work in claimed {
+        println!("  {}", text(&work["conversation"]));
+        println!("      {}", text(&work["doing"]));
+    }
+}
+
+fn behind(waiting: &serde_json::Value) -> String {
+    match waiting.as_u64().unwrap_or(0) {
+        0 => String::new(),
+        1 => ", 1 message waiting".to_string(),
+        many => format!(", {many} messages waiting"),
+    }
 }
 
 fn text(value: &serde_json::Value) -> &str {

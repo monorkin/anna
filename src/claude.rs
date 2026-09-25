@@ -325,12 +325,23 @@ pub fn login() -> String {
     }
 }
 
+/// What a commit or a pull request says is hers to say: Claude Code's own
+/// co-author trailer, "made with" line and session link are all turned off,
+/// in her folder and in every hand's. Whatever else is set there stays.
+pub fn write_settings(home: &Path) -> Result<()> {
+    let path = home.join("settings.json");
+    let mut settings = if path.exists() { read_json(&path)? } else { json!({}) };
+    settings["attribution"] = json!({ "commit": "", "pr": "", "sessionUrl": false });
+    fs::write(&path, serde_json::to_string_pretty(&settings)?).with_context(|| format!("could not write {}", path.display()))
+}
+
 pub fn write_hand_profile(profile: &Path) -> Result<()> {
     let home = paths::claude_config_home();
     let credentials: Value = read_json(&home.join(".credentials.json"))?;
     let identity: Value = read_json(&home.join(".claude.json"))?;
 
     write_private(&profile.join(".credentials.json"), &access_only(&credentials)?)?;
+    write_settings(profile)?;
     // A sandboxed session sees no folder of hers but this one, and what she
     // knows about using a tool is worth as much to a hand as to a thread
     crate::skills::copy_into_profile(profile)?;
@@ -374,6 +385,25 @@ mod tests {
             .flatten()
             .filter_map(|entry| fs::read(entry.path().join("cmdline")).ok())
             .any(|command_line| String::from_utf8_lossy(&command_line).contains(marker))
+    }
+
+    #[test]
+    fn nothing_she_commits_or_opens_carries_claude_codes_attribution() {
+        let home = std::env::temp_dir().join(format!("anna-settings-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+
+        write_settings(&home).unwrap();
+        let written: Value = read_json(&home.join("settings.json")).unwrap();
+        assert_eq!(written["attribution"], json!({ "commit": "", "pr": "", "sessionUrl": false }));
+
+        fs::write(home.join("settings.json"), r#"{"theme":"dark","attribution":{"commit":"Co-authored-by: Claude"}}"#).unwrap();
+        write_settings(&home).unwrap();
+        let written: Value = read_json(&home.join("settings.json")).unwrap();
+        assert_eq!(written["theme"], "dark", "what else is set there stays");
+        assert_eq!(written["attribution"]["commit"], "");
+        assert_eq!(written["attribution"]["sessionUrl"], false);
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

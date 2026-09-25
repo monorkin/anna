@@ -22,9 +22,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::broker::Tool;
+use crate::broker::{Tool, text_of};
 use crate::clock;
-use crate::conversation::Origin;
+use crate::conversation::{Origin, Standing};
 use crate::judge::{Judge, Screening};
 use crate::logs;
 use crate::store::{Store, Work};
@@ -183,9 +183,14 @@ impl Tool for ListWork {
     }
 }
 
+/// Passes on what this turn may do along with what it says: a turn a
+/// trusted person started could do the other thread's work itself, so
+/// letting that thread do it instead widens nothing, and it is the thread
+/// that knows the work. Anything else stays as untrusted as it arrived.
 pub struct TellThread {
     pub database: PathBuf,
     pub thread: String,
+    pub standing: Standing,
 }
 
 impl Tool for TellThread {
@@ -194,7 +199,7 @@ impl Tool for TellThread {
     }
 
     fn description(&self) -> &str {
-        "Tell another of your threads something, by the thread name the board shows. It is woken in its own conversation with your message, so say what you know, what you are doing about it, and what you want from it — and remember the person in that conversation may see the result. Use it when work overlaps; it is not for chatting."
+        "Tell another of your threads something, by the thread name the board shows. It is woken in its own conversation with your message, so say what you know, what you are doing about it, and what you want from it — and remember the person in that conversation may see the result. It is woken on this turn's standing: sent from a turn one of the people you take direction from started, it has a shell for what you pass on, so a go-ahead they gave you for another thread's work goes this way, not through you doing that work. Use it when work overlaps; it is not for chatting."
     }
 
     fn input_schema(&self) -> Value {
@@ -206,8 +211,8 @@ impl Tool for TellThread {
     }
 
     fn call(&self, arguments: &Value) -> Result<String> {
-        let to_thread = arguments["thread"].as_str().context("thread is required")?;
-        let message = arguments["message"].as_str().filter(|it| !it.trim().is_empty()).context("message is required")?;
+        let to_thread = text_of(arguments, "thread")?;
+        let message = text_of(arguments, "message")?;
         if to_thread == self.thread {
             bail!("that is this thread");
         }
@@ -222,8 +227,9 @@ impl Tool for TellThread {
             bail!("this thread has sent {MOST_MESSAGES_AN_HOUR} messages in the last hour, which is the most it may; say what you need to in this conversation instead");
         }
 
-        store.send_mail(&self.thread, &to, message, now)?;
-        logs::event("mail.sent", json!({ "from": self.thread, "to": to_thread }));
+        let trusted = self.standing == Standing::Trusted;
+        store.send_mail(&self.thread, &to, message, trusted, now)?;
+        logs::event("mail.sent", json!({ "from": self.thread, "to": to_thread, "trusted": trusted }));
         Ok(format!("Sent. {to_thread} will be woken with it."))
     }
 }
@@ -241,7 +247,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("anna-tell-thread-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         let database = directory.join("anna.db");
-        let tell = TellThread { database: database.clone(), thread: "basecamp-card-1".to_string() };
+        let tell = TellThread { database: database.clone(), thread: "basecamp-card-1".to_string(), standing: Standing::Trusted };
 
         let to_nobody = tell.call(&json!({ "thread": "basecamp-card-9", "message": "Same bug." })).unwrap_err();
         assert!(to_nobody.to_string().contains("no thread called basecamp-card-9"));
@@ -253,8 +259,9 @@ mod tests {
         // What one agent asks of another, sent without a judge to call it manipulation
         let asked = tell.call(&json!({ "thread": "basecamp-card-2", "message": "Stop, don't push yet. Ask Marta on the to-do before you do." })).unwrap();
         assert_eq!(asked, "Sent. basecamp-card-2 will be woken with it.");
+        assert!(store.undelivered_mail().unwrap()[0].trusted, "sent on a trusted turn, it wakes the other thread trusted");
         for _ in 1..MOST_MESSAGES_AN_HOUR {
-            store.send_mail("basecamp-card-1", &origin("card-2"), "again", unix_now()).unwrap();
+            store.send_mail("basecamp-card-1", &origin("card-2"), "again", false, unix_now()).unwrap();
         }
         let too_many = tell.call(&json!({ "thread": "basecamp-card-2", "message": "Same bug." })).unwrap_err();
         assert!(too_many.to_string().contains("the most it may"));

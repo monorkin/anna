@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::at_work::AtWork;
+use crate::claude;
 use crate::config::{self, Config};
 use crate::editor::Editor;
 use crate::judge::Judge;
@@ -38,6 +40,9 @@ pub struct Runtime {
     /// What couldn't be checked yet, waiting to be read with read_held_back.
     pub held: Arc<HeldBack>,
     pub outside: Arc<Outside>,
+    /// What is going on this minute, which nothing else keeps: the board
+    /// outlives a turn and the log is already past.
+    pub at_work: Arc<AtWork>,
     _proxy: Proxy,
 }
 
@@ -47,6 +52,7 @@ impl Runtime {
         paths::sweep_sockets(false);
 
         let config = Config::load()?;
+        claude::write_settings(&paths::claude_config_home())?;
         let judge = Arc::new(Judge::with_whatever_is_set_up(&config));
         let style = config::style()?;
         let editor = Arc::new(Editor::new(style.clone(), judge.clone()));
@@ -77,6 +83,7 @@ impl Runtime {
             catalog,
             held,
             outside,
+            at_work: Arc::new(AtWork::default()),
             _proxy: proxy,
         })
     }
