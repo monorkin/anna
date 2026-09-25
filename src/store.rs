@@ -16,7 +16,7 @@ use std::path::Path;
 
 use crate::conversation::Origin;
 
-const MIGRATIONS: [&str; 5] = ["
+const MIGRATIONS: [&str; 6] = ["
     CREATE TABLE schedules (
         id INTEGER PRIMARY KEY,
         source TEXT NOT NULL,
@@ -68,6 +68,8 @@ const MIGRATIONS: [&str; 5] = ["
     );
 ", "
     ALTER TABLE mail ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0;
+", "
+    ALTER TABLE work ADD COLUMN about TEXT;
 "];
 
 /// A turn that was asked for and not yet finished: what a stopped Anna
@@ -100,6 +102,10 @@ pub struct Work {
     pub thread: String,
     pub title: String,
     pub project: Option<String>,
+    /// The id of the to-do, card or message the work is on, when that isn't
+    /// the conversation the thread lives in: what is said there is routed to
+    /// this thread rather than to one that would only pass it on.
+    pub about: Option<String>,
     pub updated: String,
 }
 
@@ -284,16 +290,28 @@ impl Store {
     }
 
     /// One line per conversation: claiming again replaces what was claimed.
-    pub fn claim_work(&self, origin: &Origin, thread: &str, title: &str, project: Option<&str>, now: &str) -> Result<()> {
+    pub fn claim_work(&self, origin: &Origin, thread: &str, title: &str, project: Option<&str>, about: Option<&str>, now: &str) -> Result<()> {
         self.connection.execute(
-            "INSERT INTO work (source, conversation, thread, title, project, status, updated)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6)
+            "INSERT INTO work (source, conversation, thread, title, project, about, status, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7)
              ON CONFLICT (source, conversation) DO UPDATE SET
                  thread = excluded.thread, title = excluded.title, project = excluded.project,
-                 status = 'open', updated = excluded.updated",
-            params![origin.source, origin.conversation, thread, title, project, now],
+                 about = excluded.about, status = 'open', updated = excluded.updated",
+            params![origin.source, origin.conversation, thread, title, project, about, now],
         )?;
         Ok(())
+    }
+
+    /// The thread that has claimed work on a recording, by the id it named.
+    pub fn thread_working_on(&self, about: &str) -> Result<Option<(String, Origin)>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT thread, source, conversation FROM work WHERE status = 'open' AND about = ?1 ORDER BY updated DESC LIMIT 1",
+                params![about],
+                |row| Ok((row.get(0)?, Origin { source: row.get(1)?, conversation: row.get(2)? })),
+            )
+            .optional()?)
     }
 
     pub fn finish_work(&self, origin: &Origin, now: &str) -> Result<bool> {
@@ -308,7 +326,7 @@ impl Store {
     /// asking from outside a thread.
     pub fn open_work(&self) -> Result<Vec<Work>> {
         let mut statement = self.connection.prepare(
-            "SELECT source, conversation, thread, title, project, updated FROM work
+            "SELECT source, conversation, thread, title, project, about, updated FROM work
              WHERE status = 'open' ORDER BY updated DESC",
         )?;
         let work = statement
@@ -318,7 +336,8 @@ impl Store {
                     thread: row.get(2)?,
                     title: row.get(3)?,
                     project: row.get(4)?,
-                    updated: row.get(5)?,
+                    about: row.get(5)?,
+                    updated: row.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -327,7 +346,7 @@ impl Store {
 
     pub fn open_work_of_others(&self, origin: &Origin) -> Result<Vec<Work>> {
         let mut statement = self.connection.prepare(
-            "SELECT source, conversation, thread, title, project, updated FROM work
+            "SELECT source, conversation, thread, title, project, about, updated FROM work
              WHERE status = 'open' AND NOT (source = ?1 AND conversation = ?2) ORDER BY updated DESC",
         )?;
         let work = statement
@@ -337,7 +356,8 @@ impl Store {
                     thread: row.get(2)?,
                     title: row.get(3)?,
                     project: row.get(4)?,
-                    updated: row.get(5)?,
+                    about: row.get(5)?,
+                    updated: row.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -481,14 +501,17 @@ mod tests {
     #[test]
     fn a_thread_sees_what_the_others_have_open_but_not_its_own() {
         let (store, directory) = store("work");
-        store.claim_work(&origin("card-1"), "basecamp-card-1", "Login 500s on Safari", Some("frontdesk"), "t1").unwrap();
-        store.claim_work(&origin("card-2"), "basecamp-card-2", "Session cookie dropped", Some("frontdesk"), "t2").unwrap();
-        store.claim_work(&origin("card-2"), "basecamp-card-2", "Session cookie dropped on Safari", None, "t3").unwrap();
+        store.claim_work(&origin("card-1"), "basecamp-card-1", "Login 500s on Safari", Some("frontdesk"), None, "t1").unwrap();
+        store.claim_work(&origin("card-2"), "basecamp-card-2", "Session cookie dropped", Some("frontdesk"), Some("10337671931"), "t2").unwrap();
+        store.claim_work(&origin("card-2"), "basecamp-card-2", "Session cookie dropped on Safari", None, Some("10337671931"), "t3").unwrap();
 
         let seen_by_first = store.open_work_of_others(&origin("card-1")).unwrap();
         assert_eq!(seen_by_first.len(), 1);
         assert_eq!(seen_by_first[0].title, "Session cookie dropped on Safari");
         assert_eq!(seen_by_first[0].project, None);
+        assert_eq!(seen_by_first[0].about.as_deref(), Some("10337671931"));
+        assert_eq!(store.thread_working_on("10337671931").unwrap(), Some(("basecamp-card-2".to_string(), origin("card-2"))), "what is said on that to-do is card-2's to hear");
+        assert_eq!(store.thread_working_on("1").unwrap(), None);
         assert_eq!(store.origin_of_thread("basecamp-card-2").unwrap(), Some(origin("card-2")));
         assert_eq!(store.origin_of_thread("nobody").unwrap(), None);
 

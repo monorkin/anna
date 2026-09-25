@@ -25,6 +25,7 @@ use crate::clock;
 use crate::config::Source;
 use crate::control::{self, Controls};
 use crate::conversation::{self, Conversation, Origin, Standing, Terminal};
+use crate::github;
 use crate::judge::{Judge, Screening};
 use crate::logs;
 use crate::paths;
@@ -142,6 +143,7 @@ impl Controls for Running {
             "since": self.since,
             "process": std::process::id(),
             "claude_login": claude::login(),
+            "github_login": github::login(),
             "sources": self.pokes.lock().unwrap().keys().collect::<Vec<_>>(),
             "conversations": self.turns.busy_conversations(),
             "going_on": self.going_on(),
@@ -303,8 +305,10 @@ enum Dispatched {
 }
 
 fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Source, message: Message) -> Dispatched {
-    let conversation: Arc<dyn Conversation> =
-        Arc::new(Sourced::new(name, source, &message.conversation, runtime.catalog.clone()));
+    let conversation: Arc<dyn Conversation> = match owned_elsewhere(runtime, name, source, &message.conversation) {
+        Some(owner) => owner,
+        None => Arc::new(Sourced::new(name, source, &message.conversation, runtime.catalog.clone())),
+    };
     let opened = match Store::open_at(&runtime.database).and_then(|store| store.opened(&conversation.origin())) {
         Ok(opened) => opened,
         Err(error) => {
@@ -341,6 +345,34 @@ fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Sou
     };
     wake_in_turn(runtime, turns, conversation, standing, said);
     Dispatched::Done
+}
+
+/// The thread that claimed work on the recording this conversation is
+/// about, when it lives in another conversation. A to-do's own thread would
+/// otherwise hear the go-ahead and have to pass it on; the thread with the
+/// work hears it instead, and the sender can't tell the difference.
+fn owned_elsewhere(runtime: &Arc<Runtime>, name: &str, source: &Source, conversation: &str) -> Option<Arc<dyn Conversation>> {
+    let store = Store::open_at(&runtime.database).ok()?;
+    for recording in recording_ids_in(conversation) {
+        if let Ok(Some((thread, origin))) = store.thread_working_on(&recording)
+            && origin.source == name
+            && origin.conversation != conversation
+        {
+            logs::event("message.routed", json!({ "to": thread, "about": recording }));
+            return Some(Arc::new(Sourced::new(name, source, &origin.conversation, runtime.catalog.clone())));
+        }
+    }
+    None
+}
+
+/// The ids in a conversation's name: a Basecamp subscription URL carries the
+/// account, the bucket and the recording, and a bare id is itself.
+fn recording_ids_in(conversation: &str) -> Vec<String> {
+    conversation
+        .split(|it: char| !it.is_ascii_digit())
+        .filter(|it| it.len() >= 6)
+        .map(String::from)
+        .collect()
 }
 
 /// A trusted person's message isn't screened: who sent it comes from the
@@ -537,6 +569,16 @@ mod tests {
 
         let again = [turn(5, "card-1", &format!("{STOPPED_IN_THE_MIDDLE}add metrics"))];
         assert_eq!(as_picked_up(&again)[0], format!("{STOPPED_IN_THE_MIDDLE}add metrics"), "a second restart doesn't stack it");
+    }
+
+    #[test]
+    fn a_conversations_recordings_are_read_from_its_name() {
+        assert_eq!(
+            recording_ids_in("https://3.basecampapi.com/2914079/buckets/48804061/recordings/10337671931/subscription.json"),
+            ["2914079", "48804061", "10337671931"]
+        );
+        assert_eq!(recording_ids_in("10326714209"), ["10326714209"]);
+        assert!(recording_ids_in("main").is_empty());
     }
 
     #[test]
