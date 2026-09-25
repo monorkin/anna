@@ -10,6 +10,7 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::broker::Tool;
@@ -99,11 +100,11 @@ impl Catalog {
     /// trusted doesn't get the tools of a server that acts as the person
     /// Anna works for: they could otherwise have her do things in that
     /// person's name.
-    pub fn for_standing(&self, standing: Standing, sent_back: &Arc<SentBack>) -> Vec<Box<dyn Tool>> {
+    pub fn for_standing(&self, standing: Standing, sent_back: &Arc<SentBack>, spoke: &Arc<AtomicBool>) -> Vec<Box<dyn Tool>> {
         self.tools
             .iter()
             .filter(|it| standing == Standing::Trusted || !it.trusted_only)
-            .map(|it| Box::new(Offering { offered: it.clone(), sent_back: sent_back.clone() }) as Box<dyn Tool>)
+            .map(|it| Box::new(Offering { offered: it.clone(), sent_back: sent_back.clone(), spoke: spoke.clone() }) as Box<dyn Tool>)
             .collect()
     }
 
@@ -128,7 +129,7 @@ impl Catalog {
             bail!("{name} can change things out there, and its server doesn't say otherwise, so a hand can't have it. Have the hand report to you and use {name} yourself.")
         } else {
             // Nothing it carries goes past the editor, so there is nothing to count
-            Ok(Box::new(Offering { offered: tool.clone(), sent_back: Arc::default() }))
+            Ok(Box::new(Offering { offered: tool.clone(), sent_back: Arc::default(), spoke: Arc::default() }))
         }
     }
 }
@@ -142,10 +143,12 @@ pub fn offered_name(server: &str, tool: &str) -> String {
 }
 
 /// A tool as one turn has it: the editor counts what it sends back to that
-/// turn, whichever tool the writing went out through.
+/// turn, whichever tool the writing went out through, and the turn knows
+/// once something for people has gone out through it.
 struct Offering {
     offered: Arc<Offered>,
     sent_back: Arc<SentBack>,
+    spoke: Arc<AtomicBool>,
 }
 
 impl Tool for Offering {
@@ -162,7 +165,11 @@ impl Tool for Offering {
     }
 
     fn call(&self, arguments: &Value) -> Result<String> {
-        self.offered.call(arguments, &self.sent_back)
+        let outcome = self.offered.call(arguments, &self.sent_back);
+        if outcome.is_ok() && !self.offered.prose_arguments.is_empty() {
+            self.spoke.store(true, Ordering::Relaxed);
+        }
+        outcome
     }
 }
 
@@ -315,13 +322,44 @@ mod tests {
         assert!(writes.contains("can change things out there"), "a server added today has no prose marked, and still can't post through a hand");
         assert!(catalog.grant(&["mail_digest".to_string()], trusted).err().unwrap().to_string().contains("speaks to people"));
         let turn = Arc::new(SentBack::default());
-        assert_eq!(catalog.for_standing(trusted, &turn).len(), 4, "the thread itself still gets everything");
+        let spoke = Arc::new(AtomicBool::new(false));
+        assert_eq!(catalog.for_standing(trusted, &turn, &spoke).len(), 4, "the thread itself still gets everything");
 
         // A server that acts as the person: never for a turn on an untrusted word
         assert_eq!(catalog.grant(&["my_inbox".to_string()], trusted).unwrap().len(), 1);
         assert!(catalog.grant(&["my_inbox".to_string()], Standing::CanAssignWork).is_err());
-        let offered_to_anyone: Vec<String> = catalog.for_standing(Standing::CanAssignWork, &turn).iter().map(|it| it.name().to_string()).collect();
+        let offered_to_anyone: Vec<String> = catalog.for_standing(Standing::CanAssignWork, &turn, &spoke).iter().map(|it| it.name().to_string()).collect();
         assert_eq!(offered_to_anyone, ["mail_search", "mail_threads", "mail_digest"]);
+    }
+
+    #[test]
+    fn a_turn_has_spoken_once_something_for_people_went_out_through_a_tool() {
+        let judge = Arc::new(Judge::Haiku);
+        let server = Arc::new(Mutex::new(Server::start(&fake_server()).unwrap()));
+        let offered = |prose_arguments: Vec<String>| {
+            Arc::new(Offered {
+                name: "fake_shout".to_string(),
+                remote_name: "shout".to_string(),
+                description: String::new(),
+                input_schema: json!({}),
+                prose_arguments,
+                only_reads: false,
+                trusted_only: false,
+                server: server.clone(),
+                editor: Arc::new(Editor::new(None, judge.clone())),
+                judge: judge.clone(),
+                held: Arc::new(HeldBack::default()),
+            })
+        };
+        let spoke = Arc::new(AtomicBool::new(false));
+
+        let lookup = Offering { offered: offered(Vec::new()), sent_back: Arc::default(), spoke: spoke.clone() };
+        lookup.call(&json!({})).unwrap();
+        assert!(!spoke.load(Ordering::Relaxed), "a lookup says nothing to anyone");
+
+        let post = Offering { offered: offered(vec!["text".to_string()]), sent_back: Arc::default(), spoke: spoke.clone() };
+        post.call(&json!({ "text": "On it." })).unwrap();
+        assert!(spoke.load(Ordering::Relaxed), "a comment went out, so someone has heard from her");
     }
 
     #[test]

@@ -110,7 +110,7 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
 
     let answered_otherwise = conversation.answered_otherwise();
     let mut tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(StartHand { workshop: workshop.clone(), catalog: runtime.catalog.clone(), standing }),
+        Box::new(StartHand { workshop: workshop.clone(), catalog: runtime.catalog.clone(), standing, spoke: spoke.clone() }),
         Box::new(SendBack { workshop }),
         Box::new(Dismiss { hands: hands.clone() }),
         Box::new(ReadHeldBack { held: runtime.held.clone(), judge: runtime.judge.clone() }),
@@ -129,7 +129,7 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
     if standing == Standing::Trusted {
         tools.push(Box::new(ClaudeUsage));
     }
-    tools.extend(runtime.catalog.for_standing(standing, &sent_back));
+    tools.extend(runtime.catalog.for_standing(standing, &sent_back, &spoke));
     let endpoint = Endpoint::open(&paths::socket(&format!("thread-{key}")), tools)?;
 
     logs::event("thread.woken", json!({ "conversation": key }));

@@ -90,6 +90,10 @@ pub struct StartHand {
     /// Whose word the turn runs on, which is what a hand it starts may be
     /// granted.
     pub standing: Standing,
+    /// Whether anything for people has gone out this turn. A hand takes
+    /// minutes and whoever asked hears nothing while it runs, so the first
+    /// one waits for a word to them.
+    pub spoke: Arc<AtomicBool>,
 }
 
 impl Tool for StartHand {
@@ -98,7 +102,7 @@ impl Tool for StartHand {
     }
 
     fn description(&self) -> &str {
-        "Start a sandboxed worker in one project folder and give it a brief. It can read and write that folder and nothing else, has no network and none of your memory, so the brief must carry everything it needs to know. It has the languages installed here and builds from what is already fetched, so when the work needs a build, either fetch the project's dependencies yourself first (cargo fetch, bundle install, npm ci) or grant it the registries and say so in the brief. Its builds go to a folder of their own, not the project's. When it finishes, a reviewer checks the work against your brief, and you get the hand's id and the reviewer's verdict. Then send_back or dismiss. A hand takes minutes, and whoever asked hears nothing while it runs, so unless you have already said something in this turn, tell them what you're about to do in one line before you start it — one line, not an account of your reasoning."
+        "Start a sandboxed worker in one project folder and give it a brief. It can read and write that folder and nothing else, has no network and none of your memory, so the brief must carry everything it needs to know. It has the languages installed here and builds from what is already fetched, so when the work needs a build, either fetch the project's dependencies yourself first (cargo fetch, bundle install, npm ci) or grant it the registries and say so in the brief. Its builds go to a folder of their own, not the project's. When it finishes, a reviewer checks the work against your brief, and you get the hand's id and the reviewer's verdict. Then send_back or dismiss. A hand takes minutes, and whoever asked hears nothing while it runs, so the first hand of a turn is refused until you have told them what you're about to do, in one line, where they asked — one line, not an account of your reasoning. Only a turn nobody is waiting on — one you scheduled for yourself — starts a hand without a word, with `quietly`."
     }
 
     fn input_schema(&self) -> Value {
@@ -121,12 +125,17 @@ impl Tool for StartHand {
                     "type": "boolean",
                     "description": "Let the hand fetch from the package registries — rubygems, npm, crates.io, PyPI, mise, nodejs.org — and nothing else out there. For work that needs dependencies you haven't fetched. Git remotes stay yours.",
                 },
+                "quietly": {
+                    "type": "boolean",
+                    "description": "Start it without having said anything to anyone this turn. Only for a turn nobody is waiting on, such as one you scheduled for yourself.",
+                },
             },
             "required": ["project", "brief"],
         })
     }
 
     fn call(&self, arguments: &Value) -> Result<String> {
+        may_start(self.spoke.load(Ordering::Relaxed), arguments["quietly"].as_bool().unwrap_or(false))?;
         let names: Vec<String> = arguments["tools"]
             .as_array()
             .map(|names| names.iter().filter_map(|it| it.as_str().map(String::from)).collect())
@@ -141,6 +150,17 @@ impl Tool for StartHand {
         let registries = arguments["registries"].as_bool().unwrap_or(false);
         let hand = Hand::start(Path::new(text_of(arguments, "project")?), grant, &ports, registries)?;
         self.workshop.round(hand, text_of(arguments, "brief")?)
+    }
+}
+
+/// Whoever asked hears nothing while a hand runs, so the first hand waits
+/// for a word to them — the rule her instructions state, held here because
+/// stating it wasn't enough.
+fn may_start(spoke: bool, quietly: bool) -> Result<()> {
+    if spoke || quietly {
+        Ok(())
+    } else {
+        bail!("Nobody has heard from you this turn. Say what you're about to do, in one line, where the work was asked — then start the hand. If this is a turn nobody is waiting on, one you scheduled for yourself, start it with quietly: true.")
     }
 }
 
@@ -345,6 +365,14 @@ mod tests {
         reply.call(&json!({ "text": "On it." })).unwrap();
         assert_eq!(*conversation.said.lock().unwrap(), ["On it."]);
         assert!(spoke.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_first_hand_waits_for_a_word_to_whoever_asked() {
+        let refused = may_start(false, false).unwrap_err().to_string();
+        assert!(refused.contains("Nobody has heard from you this turn"), "{refused}");
+        assert!(may_start(true, false).is_ok(), "once something went out, hands may start");
+        assert!(may_start(false, true).is_ok(), "a turn nobody is waiting on says so and goes ahead");
     }
 
     #[test]
