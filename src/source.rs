@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::config::{Call, Cursor, Pointers, Source};
+use crate::config::{Call, Cursor, Latest, Pointers, Source};
 use crate::conversation::{Conversation, Origin};
 use crate::fsutil;
 use crate::logs;
@@ -46,6 +46,71 @@ pub fn messages_in(source: &Source, answer: &str) -> Result<Vec<Message>> {
             })
         })
         .collect())
+}
+
+/// What someone said, as the source reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spoken {
+    pub sender: String,
+    pub sender_name: Option<String>,
+    pub text: String,
+}
+
+const MOST_PAGES: u64 = 30;
+
+/// Who spoke last where the message points, asked of the source page by
+/// page until a page comes back empty. None when nothing was said there.
+pub fn newest_spoken(catalog: &Catalog, source: &Source, latest: &Latest, conversation: &str) -> Result<Option<Spoken>> {
+    let recording = last_id_in(conversation).context("the conversation's name carries no id to ask about")?;
+    let mut newest = None;
+    for page in 1..=MOST_PAGES {
+        let arguments = filled_for(&latest.call.arguments, &recording, page);
+        let answer = catalog.call(&source.server, &latest.call.tool, &arguments)?;
+        match last_on_page(latest, &answer)? {
+            Some(spoken) => newest = Some(spoken),
+            None => break,
+        }
+    }
+    Ok(newest)
+}
+
+fn last_id_in(conversation: &str) -> Option<String> {
+    conversation.rsplit(|it: char| !it.is_ascii_digit()).find(|it| !it.is_empty()).map(String::from)
+}
+
+fn filled_for(template: &Value, recording: &str, page: u64) -> Value {
+    match template {
+        Value::String(it) if it == "{recording}" => number_or_text(recording),
+        Value::String(it) if it == "{page}" => Value::from(page),
+        Value::String(it) => Value::from(it.replace("{recording}", recording).replace("{page}", &page.to_string())),
+        Value::Array(items) => items.iter().map(|it| filled_for(it, recording, page)).collect(),
+        Value::Object(fields) => fields
+            .iter()
+            .map(|(name, value)| (name.clone(), filled_for(value, recording, page)))
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+        other => other.clone(),
+    }
+}
+
+/// The last item on a page, or None for an empty page. The list is looked
+/// for at each of the pointers, since a server's first page and its later
+/// ones can differ in shape.
+fn last_on_page(latest: &Latest, answer: &str) -> Result<Option<Spoken>> {
+    let answer: Value = serde_json::from_str(answer).context("the listing did not answer with JSON")?;
+    let items = latest
+        .items
+        .each()
+        .into_iter()
+        .find_map(|pointer| answer.pointer(pointer).and_then(Value::as_array))
+        .with_context(|| format!("there is no list at {} in the listing's answer", latest.items.each().join(" or ")))?;
+    Ok(items.last().and_then(|item| {
+        Some(Spoken {
+            sender: text_at(item, &latest.sender)?,
+            sender_name: latest.sender_name.as_deref().and_then(|it| text_at(item, it)),
+            text: text_at(item, &latest.text)?,
+        })
+    }))
 }
 
 /// The values at every pointer, joined. A pointer that finds nothing is
@@ -414,6 +479,29 @@ mod tests {
         position.move_to_where(&json!({ "items": [] }).to_string()).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "p-71", "an answer without a position leaves her where she was");
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn who_spoke_last_is_the_last_item_of_the_last_page_that_has_any() {
+        let latest: Latest = serde_json::from_value(json!({
+            "call": { "tool": "basecamp_messages", "arguments": { "action": "list_comments", "params": { "recordingId": "{recording}", "page": "{page}" } } },
+            "items": ["", "/results"],
+            "sender": "/creator/id", "sender_name": "/creator/name", "text": "/content",
+        }))
+        .unwrap();
+
+        let first_page = r#"[{"creator":{"id":1,"name":"Sam"},"content":"<p>first</p>"},{"creator":{"id":2,"name":"Marta"},"content":"go"}]"#;
+        let later_page = r#"{"next_page":3,"results":[{"creator":{"id":3,"name":"Ivo"},"content":"wait"}]}"#;
+        let empty = r#"{"next_page":4,"results":[]}"#;
+        assert_eq!(last_on_page(&latest, first_page).unwrap(), Some(Spoken { sender: "2".to_string(), sender_name: Some("Marta".to_string()), text: "go".to_string() }));
+        assert_eq!(last_on_page(&latest, later_page).unwrap().unwrap().sender, "3", "a later page wraps its list");
+        assert_eq!(last_on_page(&latest, empty).unwrap(), None);
+        assert!(last_on_page(&latest, r#"{"error":"nope"}"#).is_err());
+
+        let filled = filled_for(&latest.call.arguments, "30000000001", 2);
+        assert_eq!(filled, json!({ "action": "list_comments", "params": { "recordingId": 30000000001u64, "page": 2 } }));
+        assert_eq!(last_id_in("https://3.basecampapi.com/1000001/buckets/2000001/recordings/30000000001/subscription.json").as_deref(), Some("30000000001"));
+        assert_eq!(last_id_in("main"), None);
     }
 
     #[test]

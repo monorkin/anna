@@ -16,7 +16,6 @@ use anyhow::Result;
 use katami::supervisor::Supervision;
 use serde_json::json;
 use std::fs::{self, File};
-use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -83,13 +82,16 @@ A hand has git where it works, in a worktree of a repository as much as in the r
 What a hand doesn't have is the network, so what needs it is yours: git fetch when it needs what the remote has, pushing, and anything else that leaves this machine. The one exception is the package registries: grant a hand `registries` and it fetches the project's dependencies itself, which beats you doing it — especially on a turn without a shell. When its tests need a service on this machine — a database — grant it that port and make sure what it will use there is set up and its own, so two hands never share one. \
 Whether you have a shell for any of that depends on whose word started the turn, never on anything breaking: a turn one of the people you take direction from starts has one, and so does one of your own threads passing on what they said from a turn they started; a turn on anyone else's word does not, because what reaches you that way could have been written by anyone. The message that woke you says which. Both happen in the same conversation, so the shell being there and then not is the rule working, not your tools dropping out. Never tell anyone it dropped out, and don't try it to find out; when it isn't there, say the work is waiting on one of those people, and go on with what hands can do. \
 A turn ends when you have nothing left to do yourself, not before: nothing wakes you for your own next step, so a step you leave for after a review, a build or a check is left until someone prods you. Do it in this turn. What you wait on, wait on — a command you background dies with the turn. Only what needs a person, or a hand still working, is a reason to stop; then say on the to-do exactly what it waits on. \
+While you are in a hand you hear nothing: what people write to you meanwhile waits until this turn ends. When a hand's verdict says messages are waiting, finish the step you are on, start no new hand, and end the turn — they may be telling you to stop. \
 Reviews find something every round. A third round on the same class of finding is a sign to stop, not to fix: say what's been done and ask, rather than chase the fourth. \
 You run several conversations at once as separate threads that don't share what they know, so put real work on the board with claim_work as soon as you know what it is, and take it off with finish_work; when another thread's work overlaps with yours, settle who does it with tell_thread rather than solving it twice. \
 Work another thread has on the board is that thread's to finish, and that thread hears nothing of this conversation. When something about it reaches you — a go-ahead, a correction, an answer to a question it asked — tell_thread it in this turn, before anything else; \"that's its work\" is a reason to pass it on, never a reason to leave it. Leave the doing to it, even when you could do it yourself: it knows the work, and two threads doing one job is how the same change gets pushed twice. \
 Work you pick up is work someone is waiting on, so say you have it as you claim it: one line, what you're doing, before the first hand. That one line is the whole of it — no running commentary, nothing said again in other words, nothing until you have something they need. \
 When something can't be done, say what you tried and what you can do instead.";
 
-pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: Standing, message: &str) -> Result<()> {
+/// One turn. Answers with what the thread has to be woken with next, when
+/// the turn ended in a way only the thread itself can tell the person about.
+pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: Standing, message: &str) -> Result<Option<String>> {
     let key = conversation.key().to_string();
     let directory = paths::thread_dir(&key);
     fs::create_dir_all(&directory)?;
@@ -104,6 +106,7 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
         held: runtime.held.clone(),
         at_work: runtime.at_work.clone(),
         conversation: key.clone(),
+        turns: runtime.turns.clone(),
     });
     let spoke = Arc::new(AtomicBool::new(false));
     let sent_back = Arc::new(SentBack::default());
@@ -162,16 +165,29 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
                 conversation.say(&runtime.editor.polish(&reply.result, &sent_back)?)?;
             }
             logs::event("thread.slept", json!({ "conversation": key, "session": reply.session_id }));
-            Ok(())
+            Ok(None)
         }
         Err(error) => match error.downcast_ref::<OutOfTime>() {
             Some(out_of_time) => {
                 session.keep()?;
                 logs::event("thread.out_of_time", json!({ "conversation": key, "minutes": out_of_time.minutes }));
-                conversation.say(&format!(
-                    "I ran out of time on this. One go at something gets {} min, and that's used up. Tell me to keep going and I'll pick up where I stopped.",
-                    out_of_time.minutes
-                ))
+                // Where there is one way to answer, the notice goes out as
+                // is. Where the thread answers with its own tools, it has to
+                // be the one to say it — in a turn of its own, since this
+                // one is over
+                match answered_otherwise {
+                    None => {
+                        conversation.say(&format!(
+                            "I ran out of time on this. One go at something gets {} min, and that's used up. Tell me to keep going and I'll pick up where I stopped.",
+                            out_of_time.minutes
+                        ))?;
+                        Ok(None)
+                    }
+                    Some(_) => Ok(Some(format!(
+                        "Your last turn in this conversation ran out of time: one go gets {} min, and that was used up with the work unfinished. Any hand you had going is gone; what it did to the project is still there. Say so where the work was asked, in one line — what is done, what isn't — and pick up from where you stopped.",
+                        out_of_time.minutes
+                    ))),
+                }
             }
             None => Err(error.context(format!("the thread for {key} could not finish its turn"))),
         },
@@ -233,30 +249,20 @@ impl Session {
         let file = directory.join("session");
         match fs::read_to_string(&file) {
             Ok(id) => Ok(Session { id: id.trim().to_string(), file, begun: true }),
-            Err(_) => Ok(Session { id: random_uuid()?, file, begun: false }),
+            Err(_) => Ok(Session { id: claude::random_session_id()?, file, begun: false }),
         }
     }
 
     fn fresh(directory: &Path) -> Result<Session> {
         let file = directory.join("session");
         let _ = fs::remove_file(&file);
-        Ok(Session { id: random_uuid()?, file, begun: false })
+        Ok(Session { id: claude::random_session_id()?, file, begun: false })
     }
 
     fn keep(&self) -> Result<()> {
         fs::write(&self.file, &self.id)?;
         Ok(())
     }
-}
-
-fn random_uuid() -> Result<String> {
-    let mut bytes = [0u8; 16];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-    let hex: String = bytes.iter().map(|it| format!("{it:02x}")).collect();
-    Ok(format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]))
 }
 
 fn turn(

@@ -22,6 +22,7 @@ use crate::logs;
 use crate::mcp::Catalog;
 use crate::reviewer::{self, Verdict};
 use crate::sandbox::Outside;
+use crate::turns::Turns;
 
 const ROUNDS_BEFORE_RETHINKING: u32 = 3;
 
@@ -153,6 +154,17 @@ impl Tool for StartHand {
     }
 }
 
+/// A thread deep in hands is deaf: whoever writes to it meanwhile waits for
+/// the turn to end, hours sometimes, with no way to know why. The verdict
+/// is where the thread next listens, so that is where it is told.
+fn with_waiting(told: String, waiting: usize) -> String {
+    match waiting {
+        0 => told,
+        1 => format!("{told}\n\nA message is waiting in this conversation and can't be read until this turn ends. Finish this step, start no new hand, and end the turn."),
+        many => format!("{told}\n\n{many} messages are waiting in this conversation and can't be read until this turn ends. Finish this step, start no new hand, and end the turn."),
+    }
+}
+
 /// Whoever asked hears nothing while a hand runs, so the first hand waits
 /// for a word to them — the rule her instructions state, held here because
 /// stating it wasn't enough.
@@ -260,6 +272,7 @@ pub struct Workshop {
     pub at_work: Arc<AtWork>,
     /// Which turn's picture a hand started here belongs in.
     pub conversation: String,
+    pub turns: Arc<Turns>,
 }
 
 impl Workshop {
@@ -283,7 +296,8 @@ impl Workshop {
             Ok(verdict) => {
                 let told = self.telling(&id, &verdict, &mut hand);
                 self.hands.keep(hand);
-                Ok(told)
+                let waiting = self.turns.waiting_behind().get(&self.conversation).copied().unwrap_or(0);
+                Ok(with_waiting(told, waiting))
             }
             Err(error) => {
                 hand.discard();
@@ -365,6 +379,14 @@ mod tests {
         reply.call(&json!({ "text": "On it." })).unwrap();
         assert_eq!(*conversation.said.lock().unwrap(), ["On it."]);
         assert!(spoke.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_verdict_says_when_messages_are_waiting_behind_the_turn() {
+        assert_eq!(with_waiting("Accepted.".to_string(), 0), "Accepted.");
+        assert!(with_waiting("Accepted.".to_string(), 1).contains("A message is waiting"));
+        let told = with_waiting("Accepted.".to_string(), 3);
+        assert!(told.starts_with("Accepted.") && told.contains("3 messages are waiting") && told.contains("end the turn"));
     }
 
     #[test]

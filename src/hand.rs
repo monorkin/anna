@@ -22,12 +22,17 @@ use crate::proxy::{self, Proxy};
 use crate::sandbox::{self, Outside, Sandbox, Service};
 use crate::transcripts;
 
+const CARRY_ON: &str = "Your run was cut off part way — the login it ran on was refreshed underneath it — and you have just been started again in the same session. Nothing you did is lost. Look at where things stand and carry on from there; when you are done, report as you would have.";
+
 pub struct Hand {
     id: String,
     project: PathBuf,
     directory: PathBuf,
     build_dir: PathBuf,
-    session: Option<String>,
+    /// Its Claude session, named before the first run so a run that dies
+    /// with the work half done can be picked up rather than started over.
+    session: String,
+    begun: bool,
     granted: Option<Endpoint>,
     services: Vec<Service>,
     bridges: Vec<Child>,
@@ -58,6 +63,7 @@ impl Hand {
         let id = format!("h{:x}", clock::nanos());
         let directory = paths::sessions_dir().join(&id);
         claude::write_hand_profile(&directory.join("profile"))?;
+        sandbox::make_scratch(&directory)?;
         let build_dir = sandbox::build_dir_of(&project)?;
 
         let granted_names: Vec<String> = grant.iter().map(|it| it.name().to_string()).collect();
@@ -80,7 +86,8 @@ impl Hand {
             project,
             directory,
             build_dir,
-            session: None,
+            session: claude::random_session_id()?,
+            begun: false,
             granted,
             services,
             bridges,
@@ -119,9 +126,32 @@ impl Hand {
 
     pub fn work(&mut self, brief: &str, outside: &Outside, started: &Started) -> Result<String> {
         self.asked.push(brief.to_string());
-        if self.session.is_some() {
+        if self.begun {
             claude::refresh_hand_login(&self.directory.join("profile"))?;
         }
+
+        let mut command = self.command(outside)?;
+        let mut reply = claude::reply_of(&mut command, brief, outside.time_limit, Some(started));
+        // Her login was refreshed while the hand ran, and the token it held
+        // was revoked with that. The session is whole: it goes on with the
+        // new token and what it had done.
+        if reply.as_ref().is_err_and(claude::says_the_login_was_revoked) {
+            logs::event("hand.login_refreshed", json!({ "hand": self.id }));
+            self.begun = true;
+            claude::refresh_hand_login(&self.directory.join("profile"))?;
+            let mut again = self.command(outside)?;
+            reply = claude::reply_of(&mut again, CARRY_ON, outside.time_limit, Some(started));
+        }
+        // Where there was no repository the sandbox covers .git, which leaves
+        // an empty folder behind; only an empty one can be removed this way
+        let _ = fs::remove_dir(self.project.join(".git"));
+        let reply = reply?;
+        logs::event("hand.reported", json!({ "hand": self.id, "session": reply.session_id }));
+        self.begun = true;
+        Ok(reply.result)
+    }
+
+    fn command(&self, outside: &Outside) -> Result<Command> {
         let sandbox = Sandbox {
             project: self.project.clone(),
             profile: self.directory.join("profile"),
@@ -131,6 +161,7 @@ impl Hand {
             build_dir: self.build_dir.clone(),
             services: self.services.clone(),
             registries: self.registries.as_ref().map(|it| it.socket().to_path_buf()),
+            scratch: self.directory.clone(),
         };
 
         let mut command = sandbox.claude(&claude::binary()?);
@@ -139,18 +170,12 @@ impl Hand {
         if self.granted.is_some() {
             command.args(["--mcp-config", &broker::mcp_config(Path::new(sandbox::BROKER_INSIDE))]);
         }
-        if let Some(session) = &self.session {
-            command.args(["--resume", session]);
+        if self.begun {
+            command.args(["--resume", &self.session]);
+        } else {
+            command.args(["--session-id", &self.session]);
         }
-
-        let reply = claude::reply_of(&mut command, brief, outside.time_limit, Some(started));
-        // Where there was no repository the sandbox covers .git, which leaves
-        // an empty folder behind; only an empty one can be removed this way
-        let _ = fs::remove_dir(self.project.join(".git"));
-        let reply = reply?;
-        logs::event("hand.reported", json!({ "hand": self.id, "session": reply.session_id }));
-        self.session = Some(reply.session_id);
-        Ok(reply.result)
+        Ok(command)
     }
 
     pub fn discard(mut self) {

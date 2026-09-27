@@ -319,7 +319,8 @@ pub fn prose_of(tool: &str) -> BTreeMap<String, Vec<String>> {
     match tool {
         "basecamp" => BTreeMap::from([
             ("basecamp_messages".to_string(), words(&["/params/content", "/params/subject"])),
-            ("basecamp_todos".to_string(), words(&["/params/content", "/params/description"])),
+            // A to-do's `content` is its title: a label, not writing
+            ("basecamp_todos".to_string(), words(&["/params/description"])),
             ("basecamp_campfires".to_string(), words(&["/params/content"])),
             ("basecamp_cards".to_string(), words(&["/params/content", "/params/title"])),
         ]),

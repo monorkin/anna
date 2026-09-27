@@ -18,7 +18,7 @@ use crate::clock;
 use crate::hand::{self, Hand};
 use crate::logs;
 use crate::paths;
-use crate::sandbox::{Outside, Sandbox};
+use crate::sandbox::{self, Outside, Sandbox};
 use crate::transcripts;
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -36,6 +36,7 @@ pub fn review(hand: &Hand, brief: &str, report: &str, outside: &Outside, started
     let directory = paths::sessions_dir().join(format!("r{:x}", clock::nanos()));
     logs::event("review.started", json!({ "hand": hand_id, "project": project }));
     claude::write_hand_profile(&directory.join("profile"))?;
+    sandbox::make_scratch(&directory)?;
 
     // The same builds and services as the hand, so the reviewer can run
     // what the hand ran and see for itself
@@ -49,6 +50,7 @@ pub fn review(hand: &Hand, brief: &str, report: &str, outside: &Outside, started
         services: hand.services().to_vec(),
         // It reads what the hand did; it fetches nothing
         registries: None,
+        scratch: directory.clone(),
     };
     let mut command = sandbox.claude(&claude::binary()?);
     command.args(["--dangerously-skip-permissions", "--strict-mcp-config", "--tools", sandbox.tools()]);

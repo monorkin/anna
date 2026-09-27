@@ -47,7 +47,7 @@ const MOST_WAITS_FOR_QUOTA: u32 = 120;
 pub fn run() -> Result<()> {
     let _only_one = control::be_the_only_one()?;
     let runtime = Arc::new(Runtime::start()?);
-    let turns = Arc::new(Turns::default());
+    let turns = runtime.turns.clone();
     let mut pokes = HashMap::new();
     for (name, source) in runtime.config.sources.clone() {
         let (poke, poked) = mpsc::channel();
@@ -305,6 +305,7 @@ enum Dispatched {
 }
 
 fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Source, message: Message) -> Dispatched {
+    let message = as_last_spoken(runtime, name, source, message);
     let conversation: Arc<dyn Conversation> = match owned_elsewhere(runtime, name, source, &message.conversation) {
         Some(owner) => owner,
         None => Arc::new(Sourced::new(name, source, &message.conversation, runtime.catalog.clone())),
@@ -345,6 +346,38 @@ fn dispatch(runtime: &Arc<Runtime>, turns: &Arc<Turns>, name: &str, source: &Sou
     };
     wake_in_turn(runtime, turns, conversation, standing, said);
     Dispatched::Done
+}
+
+/// The message as whoever spoke last there wrote it, for a source whose
+/// items stand for a conversation. A notification that still names whoever
+/// first put the thing on her desk would have a trusted person's go-ahead
+/// wake her on a colleague's word, without a shell. When the source can't
+/// be asked, the message stands as it came, and the log says so.
+fn as_last_spoken(runtime: &Arc<Runtime>, name: &str, source: &Source, message: Message) -> Message {
+    let Some(latest) = &source.latest else {
+        return message;
+    };
+    match source::newest_spoken(&runtime.catalog, source, latest, &message.conversation) {
+        Ok(Some(spoken)) => {
+            logs::event("message.as_last_spoken", json!({ "source": name, "message": message.id, "was": message.sender, "sender": spoken.sender }));
+            with_last_spoken(message, spoken)
+        }
+        Ok(None) => message,
+        Err(error) => {
+            logs::event("message.not_as_last_spoken", json!({ "source": name, "message": message.id, "error": format!("{error:#}") }));
+            message
+        }
+    }
+}
+
+fn with_last_spoken(message: Message, spoken: source::Spoken) -> Message {
+    let who = spoken.sender_name.clone().unwrap_or_else(|| spoken.sender.clone());
+    Message {
+        text: format!("{}\n\nThe newest comment there, by {who}:\n\n{}", message.text, spoken.text),
+        sender: spoken.sender,
+        sender_name: spoken.sender_name,
+        ..message
+    }
 }
 
 /// The thread that claimed work on the recording this conversation is
@@ -451,9 +484,14 @@ pub fn wake_in_turn(runtime: &Arc<Runtime>, turns: &Arc<Turns>, conversation: Ar
             // broke is still owed: it stays on the queue, and the next start
             // asks it again, because what was said may have reached nobody
             match wake_once_there_is_quota(&runtime, &conversation, standing, &said) {
-                Ok(()) => {
+                Ok(next) => {
                     if let Some(id) = kept {
                         let _ = Store::open_at(&runtime.database).and_then(|store| store.forget_turn(id));
+                    }
+                    // What the thread has to tell the person itself — that
+                    // it ran out of time — is its next turn, ahead of nothing
+                    if let Some(said) = next {
+                        wake_in_turn(&runtime, &runtime.turns.clone(), conversation.clone(), standing, said);
                     }
                 }
                 Err(error) => {
@@ -509,7 +547,7 @@ fn as_picked_up(left: &[PendingTurn]) -> Vec<String> {
 /// asked stays asked, at the head of its conversation, and is tried again
 /// until the allowance is back — or another account has been switched to in
 /// the meantime. Only after most of a day is it given up as broken.
-fn wake_once_there_is_quota(runtime: &Runtime, conversation: &Arc<dyn Conversation>, standing: Standing, said: &str) -> Result<()> {
+fn wake_once_there_is_quota(runtime: &Runtime, conversation: &Arc<dyn Conversation>, standing: Standing, said: &str) -> Result<Option<String>> {
     let mut waits = 0;
     loop {
         // Only said when the limit was really hit: the limit's own message is
@@ -569,6 +607,24 @@ mod tests {
 
         let again = [turn(5, "card-1", &format!("{STOPPED_IN_THE_MIDDLE}add metrics"))];
         assert_eq!(as_picked_up(&again)[0], format!("{STOPPED_IN_THE_MIDDLE}add metrics"), "a second restart doesn't stack it");
+    }
+
+    #[test]
+    fn a_message_is_heard_as_whoever_spoke_last_there() {
+        let notification = Message {
+            id: "5:t".to_string(),
+            conversation: ".../recordings/30000000001/subscription.json".to_string(),
+            sender: "10000001".to_string(),
+            sender_name: Some("Sam".to_string()),
+            text: "Re: the to-do\n\nSam's first comment\n\nhttps://app.example.com/todos/30000000001".to_string(),
+        };
+        let spoken = source::Spoken { sender: "10000002".to_string(), sender_name: Some("Marta".to_string()), text: "go".to_string() };
+        let heard = with_last_spoken(notification, spoken);
+        assert_eq!(heard.sender, "10000002", "standing follows who spoke last, not who spoke first");
+        assert_eq!(heard.sender_name.as_deref(), Some("Marta"));
+        assert!(heard.text.ends_with("The newest comment there, by Marta:\n\ngo"));
+        assert!(heard.text.starts_with("Re: the to-do"), "the notification's own words are kept for the link");
+        assert_eq!(heard.id, "5:t");
     }
 
     #[test]

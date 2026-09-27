@@ -141,6 +141,12 @@ pub struct Source {
     /// messages aren't what someone wrote but a pointer to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// How to find out what was last said, for a source whose items stand
+    /// for a conversation and not a message: Basecamp's unreads keep the
+    /// first comment's writer and excerpt however many comments follow, and
+    /// whose word a turn runs on has to be whoever actually spoke last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<Latest>,
 }
 
 /// Two JSON pointers: `from` into the watch tool's answer, `into` into its
@@ -185,6 +191,22 @@ pub struct Call {
     pub tool: String,
     #[serde(default)]
     pub arguments: serde_json::Value,
+}
+
+/// The call that lists what was said in a conversation, oldest first, a page
+/// at a time. `{recording}` in its arguments is the last id in the
+/// conversation's name and `{page}` the page asked for; pages are read until
+/// one is empty, and the last item is who spoke last.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Latest {
+    pub call: Call,
+    /// Where the list is in an answer. Several when a server's pages differ
+    /// in shape: a first page that is the list itself, later ones that wrap it.
+    pub items: Pointers,
+    pub sender: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<String>,
+    pub text: String,
 }
 
 fn default_interval() -> u64 {

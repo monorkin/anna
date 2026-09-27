@@ -4,7 +4,7 @@
 use serde_json::json;
 use std::collections::BTreeMap;
 
-use crate::config::{Call, Cursor, Pointers, Source, Trigger};
+use crate::config::{Call, Cursor, Latest, Pointers, Source, Trigger};
 use crate::setup::{own_tool_config, words};
 
 const NOTIFICATIONS_NOTE: &str = "That is the notification, not the comment: its excerpt and link are from whatever first put this on your desk, and stay the same however many comments follow. Being woken by it again means someone said something new there that you haven't seen. List the comments with your Basecamp tools and read the newest before you decide anything, every time, and answer where it was said, with those tools. Write what you post as Basecamp's editor does: plain text with <br><br> between paragraphs, <strong>, <code> and <a> where they help, <pre> for a block of code or a command with its lines as they are, and <ul><li> for a list. Not <p>: Basecamp shows adjacent paragraphs with no space between them.";
@@ -40,6 +40,7 @@ pub fn agent_source(profile: &str, watches: bool, anyone: bool) -> Source {
         reply: None,
         cursor: Some(Cursor { from: "/position".to_string(), into: "/params/position".to_string() }),
         note: Some(INBOX_NOTE.to_string()),
+        latest: None,
         trigger: if watches {
             Some(Trigger {
                 command: "basecamp".to_string(),
@@ -82,6 +83,18 @@ pub fn notifications_source(profile: Option<&str>, account: &str, watches: bool,
         reply: None,
         cursor: None,
         note: Some(NOTIFICATIONS_NOTE.to_string()),
+        // The unread item names whoever first put the recording on her
+        // desk; the comments say who spoke last
+        latest: Some(Latest {
+            call: Call {
+                tool: "basecamp_messages".to_string(),
+                arguments: json!({ "action": "list_comments", "params": { "recordingId": "{recording}", "page": "{page}" } }),
+            },
+            items: Pointers::Several(words(&["", "/results"])),
+            sender: "/creator/id".to_string(),
+            sender_name: Some("/creator/name".to_string()),
+            text: "/content".to_string(),
+        }),
         trigger: if watches {
             Some(Trigger {
                 command: "basecamp".to_string(),

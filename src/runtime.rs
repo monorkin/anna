@@ -25,6 +25,7 @@ use crate::proxy::{self, Proxy};
 use crate::sandbox::Outside;
 use crate::store::Store;
 use crate::toolchains::Toolchains;
+use crate::turns::Turns;
 use crate::held::HeldBack;
 
 pub struct Runtime {
@@ -44,6 +45,9 @@ pub struct Runtime {
     /// What is going on this minute, which nothing else keeps: the board
     /// outlives a turn and the log is already past.
     pub at_work: Arc<AtWork>,
+    /// Every conversation's queue of turns. A thread in a hand can't hear
+    /// what is queued behind it, but its tools can say so.
+    pub turns: Arc<Turns>,
     _proxy: Proxy,
 }
 
@@ -86,6 +90,7 @@ impl Runtime {
             held,
             outside,
             at_work: Arc::new(AtWork::default()),
+            turns: Arc::new(Turns::default()),
             _proxy: proxy,
         })
     }

@@ -117,6 +117,21 @@ pub fn build_dir_of(project: &Path) -> std::io::Result<PathBuf> {
     Ok(directory)
 }
 
+/// A session's /tmp and home, made in its own folder on disk and gone with
+/// it.
+pub fn make_scratch(directory: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(directory.join("tmp"))?;
+    std::fs::create_dir_all(directory.join("home"))
+}
+
+/// How many things a session's cargo compiles at once: a quarter of the
+/// cores, and at least two. Cargo would take every core, and two hands and a
+/// reviewer each doing that on 32 cores put 24 GB of rustc in memory at
+/// once and had the kernel kill one of them mid-build.
+fn build_jobs() -> usize {
+    std::thread::available_parallelism().map(|it| it.get()).unwrap_or(4).div_ceil(4).max(2)
+}
+
 /// `systemd-run`, up to where the program to run goes.
 fn scope() -> Command {
     let mut command = Command::new("systemd-run");
@@ -141,6 +156,10 @@ pub struct Sandbox<'outside> {
     /// registries. With one, the package managers aren't told they are
     /// offline, because they aren't.
     pub registries: Option<PathBuf>,
+    /// Where the session's /tmp and home live, on disk. A tmpfs there is
+    /// memory: one reviewer building into /tmp held 17 GB of it, and the
+    /// machine ran out.
+    pub scratch: PathBuf,
 }
 
 impl Sandbox<'_> {
@@ -156,7 +175,13 @@ impl Sandbox<'_> {
             .args(["--symlink", "usr/bin", "/bin"])
             .args(["--symlink", "usr/lib", "/lib"])
             .args(["--symlink", "usr/lib", "/lib64"])
-            .args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/home/hand"]);
+            .args(["--proc", "/proc", "--dev", "/dev"])
+            .arg("--bind")
+            .arg(self.scratch.join("tmp"))
+            .arg("/tmp")
+            .arg("--bind")
+            .arg(self.scratch.join("home"))
+            .arg("/home/hand");
         if let Some(gitconfig) = &self.outside.gitconfig {
             command.arg("--ro-bind").arg(gitconfig).arg("/home/hand/.gitconfig");
         }
@@ -199,6 +224,7 @@ impl Sandbox<'_> {
             .args(["--setenv", "HTTPS_PROXY", "http://127.0.0.1:3128"])
             .args(["--setenv", "CARGO_TARGET_DIR", BUILD_INSIDE])
             .args(["--setenv", "CARGO_HOME", CARGO_INSIDE])
+            .args(["--setenv", "CARGO_BUILD_JOBS", &build_jobs().to_string()])
             .args(["--setenv", "GIT_TERMINAL_PROMPT", "0"]);
         if self.registries.is_none() {
             command.args(WORKS_OFFLINE.iter().flat_map(|(name, value)| ["--setenv", name, value]));
@@ -366,13 +392,14 @@ mod tests {
             build_dir: PathBuf::from("/data/builds/abc"),
             services: vec![Service { port: 33380, socket: PathBuf::from("/run/anna/service-h1-0.sock") }],
             registries: None,
+            scratch: PathBuf::from("/data/hands/h1"),
         });
 
         assert!(arguments.contains(&"--unshare-all".to_string()));
         let git = format!("{project_path}/.git");
         assert_eq!(
             binds(&arguments, "--bind"),
-            [(project_path, project_path), (git.as_str(), git.as_str()), ("/data/hands/h1/profile", "/profile"), ("/data/builds/abc", BUILD_INSIDE)]
+            [("/data/hands/h1/tmp", "/tmp"), ("/data/hands/h1/home", "/home/hand"), (project_path, project_path), (git.as_str(), git.as_str()), ("/data/hands/h1/profile", "/profile"), ("/data/builds/abc", BUILD_INSIDE)]
         );
         assert!(binds(&arguments, "--ro-bind").contains(&("/run/anna/service-h1-0.sock", "/run/service-0.sock")));
         assert!(arguments.last().unwrap() == "sandbox" && arguments[arguments.len() - 2].contains("TCP-LISTEN:33380,fork,bind=127.0.0.1 UNIX-CONNECT:/run/service-0.sock"));
@@ -382,6 +409,7 @@ mod tests {
             assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == name && it[2] == value), "{name} tells its tool there is no network");
         }
         assert!(binds(&arguments, "--ro-bind").contains(&("/run/anna/proxy.sock", "/run/proxy.sock")));
+        assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "CARGO_BUILD_JOBS" && it[2].parse::<usize>().is_ok_and(|jobs| jobs >= 2)), "cargo doesn't take every core");
 
         let with_registries = arguments_of(&Sandbox {
             project: project.clone(),
@@ -392,6 +420,7 @@ mod tests {
             build_dir: PathBuf::from("/data/builds/abc"),
             services: Vec::new(),
             registries: Some(PathBuf::from("/run/anna/proxy-h1.sock")),
+            scratch: PathBuf::from("/data/hands/h1"),
         });
         assert!(binds(&with_registries, "--ro-bind").contains(&("/run/anna/proxy-h1.sock", "/run/proxy.sock")), "its own proxy stands in for the shared one");
         assert!(!with_registries.iter().any(|it| it == "MISE_OFFLINE" || it == "CARGO_NET_OFFLINE"), "the package managers aren't told they are offline");
@@ -423,6 +452,7 @@ mod tests {
         fs::create_dir_all(&plain).unwrap();
         fs::create_dir_all(&worktree).unwrap();
         fs::create_dir_all(root.join("profile")).unwrap();
+        make_scratch(&root.join("scratch")).unwrap();
         fs::write(worktree.join(".git"), "gitdir: /somewhere/real\n").unwrap();
         fs::write(root.join("proxy.sock"), "").unwrap();
 
@@ -445,6 +475,7 @@ mod tests {
                 build_dir: build_dir.clone(),
                 services: Vec::new(),
                 registries: None,
+                scratch: root.join("scratch"),
             };
             let output = sandbox.claude(Path::new("/usr/bin/bash")).args(["-c", script]).env("ANNA_TEST_SECRET", "s3cret").output().unwrap();
             String::from_utf8_lossy(&output.stdout).into_owned()
@@ -477,6 +508,7 @@ mod tests {
         let project = root.join("project");
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(root.join("profile")).unwrap();
+        make_scratch(&root.join("scratch")).unwrap();
         fs::create_dir_all(root.join("build")).unwrap();
         fs::write(root.join("proxy.sock"), "").unwrap();
         let git = |arguments: &[&str]| {
@@ -507,6 +539,7 @@ mod tests {
                 build_dir: root.join("build"),
                 services: Vec::new(),
                 registries: None,
+                scratch: root.join("scratch"),
             };
             let output = sandbox.claude(Path::new("/usr/bin/bash")).args(["-c", script]).output().unwrap();
             format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
@@ -553,6 +586,7 @@ mod tests {
         let project = root.join("crate");
         fs::create_dir_all(project.join("src")).unwrap();
         fs::create_dir_all(root.join("profile")).unwrap();
+        make_scratch(&root.join("scratch")).unwrap();
         fs::create_dir_all(root.join("build")).unwrap();
         fs::write(root.join("proxy.sock"), "").unwrap();
         // A dependency that is in the host's cache because Anna herself uses it
@@ -589,6 +623,7 @@ mod tests {
             build_dir: root.join("build"),
             services: vec![Service { port, socket: socket.clone() }],
             registries: None,
+            scratch: root.join("scratch"),
         };
         let script = format!("cargo run -q 2>&1; ls /build | head -1; echo | socat - TCP:127.0.0.1:{port}; cat ~/.cargo/credentials.toml 2>/dev/null && echo LEAKED");
         let output = sandbox.claude(Path::new("/usr/bin/bash")).args(["-c", &script]).output().unwrap();
@@ -622,6 +657,7 @@ mod tests {
             build_dir: PathBuf::from("/data/builds/abc"),
             services: Vec::new(),
             registries: None,
+            scratch: PathBuf::from("/data/hands/h1"),
         };
 
         let hand: Vec<&str> = sandbox(true).tools().split(',').collect();
@@ -657,6 +693,7 @@ mod tests {
             build_dir: PathBuf::from("/data/builds/abc"),
             services: Vec::new(),
             registries: None,
+            scratch: PathBuf::from("/data/hands/h1"),
         });
 
         let bwrap = arguments.iter().position(|it| it == "bwrap").expect("with a scope to be had, bwrap runs inside one");
@@ -664,7 +701,7 @@ mod tests {
         assert!(arguments[..bwrap].iter().any(|it| it.starts_with("MemoryMax=")));
         assert!(arguments[..bwrap].iter().any(|it| it.starts_with("TasksMax=")));
 
-        assert_eq!(binds(&arguments, "--bind"), [("/data/reviews/r1/profile", "/profile"), ("/data/builds/abc", BUILD_INSIDE)]);
+        assert_eq!(binds(&arguments, "--bind"), [("/data/hands/h1/tmp", "/tmp"), ("/data/hands/h1/home", "/home/hand"), ("/data/reviews/r1/profile", "/profile"), ("/data/builds/abc", BUILD_INSIDE)]);
         assert!(binds(&arguments, "--ro-bind").contains(&(installs.to_str().unwrap(), installs.to_str().unwrap())));
         assert!(binds(&arguments, "--ro-bind").contains(&("/home/someone/.config/anna/tools/gitconfig", "/home/hand/.gitconfig")), "her commits are authored as her");
         assert!(arguments.windows(3).any(|it| {

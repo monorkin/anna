@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::collections::HashSet;
@@ -167,6 +167,25 @@ impl std::error::Error for OutOfQuota {}
 /// A resume that found nothing: "No conversation found with session ID …".
 pub fn says_the_session_is_gone(error: &anyhow::Error) -> bool {
     format!("{error:#}").contains("No conversation found with session ID")
+}
+
+/// Claude Code refreshes her login now and then, and the token a session
+/// held until then is refused from that moment: "401 OAuth access token has
+/// been revoked". The session itself is whole and goes on with the new one.
+pub fn says_the_login_was_revoked(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("access token has been revoked")
+}
+
+/// A session id Claude Code will take, made here so a session can be
+/// resumed even when its first run never answered.
+pub fn random_session_id() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    let hex: String = bytes.iter().map(|it| format!("{it:02x}")).collect();
+    Ok(format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]))
 }
 
 /// Claude Code says it in a sentence, not a code: "You've hit your session
@@ -424,6 +443,15 @@ mod tests {
         assert_eq!(written["attribution"]["commit"], "");
         assert_eq!(written["attribution"]["sessionUrl"], false);
         fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn a_revoked_login_is_told_apart_from_other_failures() {
+        assert!(says_the_login_was_revoked(&anyhow::anyhow!("claude reported an error: Failed to authenticate. API Error: 401 OAuth access token has been revoked.")));
+        assert!(!says_the_login_was_revoked(&anyhow::anyhow!("claude exited with signal: 9 (SIGKILL)")));
+        let id = random_session_id().unwrap();
+        assert_eq!(id.len(), 36);
+        assert_eq!(&id[14..15], "4");
     }
 
     #[test]

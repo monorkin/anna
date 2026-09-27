@@ -257,7 +257,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Restore { path, force } => backup::restore(&path, force),
         Command::Chat { message, conversation } => {
             // Whoever is at this terminal can already do anything Anna can
-            thread::wake(&Runtime::start()?, Arc::new(Terminal::new(&conversation)), Standing::Trusted, &message)
+            thread::wake(&Runtime::start()?, Arc::new(Terminal::new(&conversation)), Standing::Trusted, &message).map(|_| ())
         }
         Command::Tell { thread, message } => lifecycle::tell(&thread, &message),
         Command::Log { follow, only } => logs::print(follow, only.as_deref()),

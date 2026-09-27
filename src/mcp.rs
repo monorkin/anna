@@ -185,7 +185,7 @@ impl Offered {
             Err(error) => format!("{error:#}"),
         };
         match self.judge.screen(&said) {
-            Screening::Clear => outcome,
+            Screening::Clear => outcome.map(|result| shortened(&result)),
             Screening::Suspicious => {
                 logs::event("mcp.withheld", json!({ "tool": self.name, "length": said.len(), "failed": outcome.is_err() }));
                 bail!("{}", withheld(outcome.is_err()))
@@ -200,6 +200,27 @@ impl Offered {
             }
         }
     }
+}
+
+/// The most of a result a session is shown. Past Claude Code's own limit a
+/// result is put in a file instead, which a turn without a shell can't
+/// open, and a hand can't be sent to. What a listing has most of is at its
+/// end — the newest comments, the last page — so that is the part kept.
+const LONGEST_RESULT: usize = 40_000;
+
+fn shortened(result: &str) -> String {
+    if result.len() <= LONGEST_RESULT {
+        return result.to_string();
+    }
+    let mut cut = result.len() - LONGEST_RESULT;
+    while !result.is_char_boundary(cut) {
+        cut += 1;
+    }
+    format!(
+        "[This answer was {} characters, too long to show whole; the first {cut} were left out and what follows is its end. In a listing the newest items are at the end.]\n{}",
+        result.len(),
+        &result[cut..]
+    )
 }
 
 /// Every argument marked as prose, put through the editor. A mark is a
@@ -360,6 +381,16 @@ mod tests {
         let post = Offering { offered: offered(vec!["text".to_string()]), sent_back: Arc::default(), spoke: spoke.clone() };
         post.call(&json!({ "text": "On it." })).unwrap();
         assert!(spoke.load(Ordering::Relaxed), "a comment went out, so someone has heard from her");
+    }
+
+    #[test]
+    fn a_result_too_long_to_show_keeps_its_end() {
+        assert_eq!(shortened("short"), "short");
+        let long = format!("{}NEWEST", "é".repeat(LONGEST_RESULT));
+        let shown = shortened(&long);
+        assert!(shown.starts_with("[This answer was"), "{}", &shown[..60]);
+        assert!(shown.ends_with("NEWEST"));
+        assert!(shown.len() < long.len());
     }
 
     #[test]
