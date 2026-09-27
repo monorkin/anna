@@ -3,7 +3,7 @@
 //!
 //! Agents write dense, over-explained prose. With a style configured, the
 //! judge scores outgoing text against it; text that falls short is rewritten
-//! by haiku under one rule — change no facts — and the judge then checks the
+//! by the editing model under one rule — change no facts — and the judge then checks the
 //! rewrite still says the same thing. Rewriting comes before rejecting because
 //! a rejection loop spends the thread's context on restyling. Only when a
 //! faithful rewrite can't be had does the text go back to the thread, with
@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::claude;
+use crate::config::Chain;
 use crate::judge::Judge;
 use crate::logs;
 
@@ -34,15 +35,16 @@ pub struct SentBack(AtomicU32);
 pub struct Editor {
     style: Option<String>,
     judge: Arc<Judge>,
+    models: Chain,
 }
 
 impl Editor {
-    pub fn new(style: Option<String>, judge: Arc<Judge>) -> Editor {
-        Editor { style, judge }
+    pub fn new(style: Option<String>, judge: Arc<Judge>, models: Chain) -> Editor {
+        Editor { style, judge, models }
     }
 
     pub fn polish(&self, text: &str, sent_back: &SentBack) -> Result<String> {
-        self.polish_with(text, sent_back, claude::ask_haiku)
+        self.polish_with(text, sent_back, |prompt, text| claude::on_each_model(&self.models, |model, _| claude::ask(model, prompt, text)))
     }
 
     fn polish_with(&self, text: &str, sent_back: &SentBack, rewrite: impl Fn(&str, &str) -> Result<String>) -> Result<String> {
@@ -117,14 +119,14 @@ mod tests {
 
     #[test]
     fn without_a_style_nothing_is_touched() {
-        let editor = Editor::new(None, Arc::new(Judge::Haiku));
+        let editor = Editor::new(None, Arc::new(Judge::claude("haiku")), Chain::of(&["haiku"]));
         assert_eq!(editor.polish("Whatever, however long.", &SentBack::default()).unwrap(), "Whatever, however long.");
     }
 
     #[test]
     fn writing_that_cant_be_restyled_is_sent_back_three_times_a_turn_then_goes_out_as_written() {
         // Each try: off style, and a rewrite that drops something
-        let editor = Editor::new(Some("Be brief.".to_string()), Arc::new(crate::judge::answering(&[0.1, 0.1, 0.9].repeat(5))));
+        let editor = Editor::new(Some("Be brief.".to_string()), Arc::new(crate::judge::answering(&[0.1, 0.1, 0.9].repeat(5))), Chain::of(&["haiku"]));
         let rewrite = |_: &str, _: &str| Ok("Short.".to_string());
         let this_turn = SentBack::default();
 

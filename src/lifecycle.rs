@@ -97,15 +97,26 @@ pub fn poke(source: Option<&str>) -> Result<()> {
 }
 
 pub fn tell(thread: &str, message: &str) -> Result<()> {
-    answered(control::ask(json!({ "command": "tell", "thread": thread, "message": message }))?)
+    println!("{}", told(thread, message)?);
+    Ok(())
 }
 
-/// What a running Anna said back: printed when she did it, an error when she
-/// couldn't.
+/// What the thread was told, in her words, for a caller that shows it
+/// somewhere other than stdout.
+pub fn told(thread: &str, message: &str) -> Result<String> {
+    said_back(control::ask(json!({ "command": "tell", "thread": thread, "message": message }))?)
+}
+
 fn answered(answer: serde_json::Value) -> Result<()> {
+    println!("{}", said_back(answer)?);
+    Ok(())
+}
+
+/// What a running Anna said back when she did it, an error when she
+/// couldn't.
+fn said_back(answer: serde_json::Value) -> Result<String> {
     if answer["ok"].as_bool().unwrap_or(false) {
-        println!("{}", text(&answer["message"]));
-        Ok(())
+        Ok(text(&answer["message"]).to_string())
     } else {
         bail!("{}", text(&answer["message"]))
     }
@@ -191,11 +202,11 @@ fn behind(waiting: &serde_json::Value) -> String {
     }
 }
 
-fn text(value: &serde_json::Value) -> &str {
+pub fn text(value: &serde_json::Value) -> &str {
     value.as_str().unwrap_or("-")
 }
 
-fn names(value: &serde_json::Value) -> String {
+pub fn names(value: &serde_json::Value) -> String {
     value
         .as_array()
         .map(|items| items.iter().filter_map(|it| it.as_str()).collect::<Vec<_>>().join(", "))

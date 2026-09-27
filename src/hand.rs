@@ -14,7 +14,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use crate::broker::{self, Endpoint, Tool};
-use crate::claude::{self, Started};
+use crate::claude::{self, Reply, Started};
 use crate::clock;
 use crate::logs;
 use crate::paths;
@@ -23,6 +23,7 @@ use crate::sandbox::{self, Outside, Sandbox, Service};
 use crate::transcripts;
 
 const CARRY_ON: &str = "Your run was cut off part way — the login it ran on was refreshed underneath it — and you have just been started again in the same session. Nothing you did is lost. Look at where things stand and carry on from there; when you are done, report as you would have.";
+const ON_ANOTHER_MODEL: &str = "Your run was cut off part way — the Claude allowance for the model it ran on is used up — and you have just been started again in the same session on another model. Nothing you did is lost. The limit message in your history is about that, not about anything in the project. Look at where things stand and carry on with the brief from there; when you are done, report as you would have.";
 
 pub struct Hand {
     id: String,
@@ -130,18 +131,16 @@ impl Hand {
             claude::refresh_hand_login(&self.directory.join("profile"))?;
         }
 
-        let mut command = self.command(outside)?;
-        let mut reply = claude::reply_of(&mut command, brief, outside.time_limit, Some(started));
-        // Her login was refreshed while the hand ran, and the token it held
-        // was revoked with that. The session is whole: it goes on with the
-        // new token and what it had done.
-        if reply.as_ref().is_err_and(claude::says_the_login_was_revoked) {
-            logs::event("hand.login_refreshed", json!({ "hand": self.id }));
-            self.begun = true;
-            claude::refresh_hand_login(&self.directory.join("profile"))?;
-            let mut again = self.command(outside)?;
-            reply = claude::reply_of(&mut again, CARRY_ON, outside.time_limit, Some(started));
-        }
+        let reply = claude::on_each_model(&outside.models.hands, |model, after_another| {
+            if after_another {
+                // The model before it ran out part way through, in this same
+                // session
+                self.begun = true;
+                self.run(model, ON_ANOTHER_MODEL, outside, started)
+            } else {
+                self.run(model, brief, outside, started)
+            }
+        });
         // Where there was no repository the sandbox covers .git, which leaves
         // an empty folder behind; only an empty one can be removed this way
         let _ = fs::remove_dir(self.project.join(".git"));
@@ -151,7 +150,24 @@ impl Hand {
         Ok(reply.result)
     }
 
-    fn command(&self, outside: &Outside) -> Result<Command> {
+    fn run(&mut self, model: &str, told: &str, outside: &Outside, started: &Started) -> Result<Reply> {
+        let mut command = self.command(model, outside)?;
+        let reply = claude::reply_of(&mut command, told, outside.time_limit, Some(started));
+        // Her login was refreshed while the hand ran and the token it held
+        // was revoked with that, or the token simply expired. The session is
+        // whole: it goes on with her current token and what it had done.
+        if reply.as_ref().is_err_and(claude::says_the_login_went_stale) {
+            logs::event("hand.login_refreshed", json!({ "hand": self.id }));
+            self.begun = true;
+            claude::refresh_hand_login(&self.directory.join("profile"))?;
+            let mut again = self.command(model, outside)?;
+            claude::reply_of(&mut again, CARRY_ON, outside.time_limit, Some(started))
+        } else {
+            reply
+        }
+    }
+
+    fn command(&self, model: &str, outside: &Outside) -> Result<Command> {
         let sandbox = Sandbox {
             project: self.project.clone(),
             profile: self.directory.join("profile"),
@@ -166,6 +182,7 @@ impl Hand {
 
         let mut command = sandbox.claude(&claude::binary()?);
         command.args(["--dangerously-skip-permissions", "--strict-mcp-config", "--tools", sandbox.tools()]);
+        command.args(["--model", model]);
         command.args(["--append-system-prompt", &what_it_can_reach(&self.services, self.registries.is_some())]);
         if self.granted.is_some() {
             command.args(["--mcp-config", &broker::mcp_config(Path::new(sandbox::BROKER_INSIDE))]);

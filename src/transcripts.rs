@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::logs;
 use crate::paths;
 
 const LONGEST_SHOWN: usize = 400;
@@ -89,6 +90,23 @@ pub fn show(id: &str) -> Result<()> {
         println!();
     }
     Ok(())
+}
+
+/// The last lines of a thread's newest transcript, rendered as `show`
+/// renders them, for `anna dash`.
+pub fn tail_of_thread(thread: &str, lines: usize) -> Vec<String> {
+    let newest = transcripts_under(&of_thread(thread))
+        .into_iter()
+        .max_by_key(|it| fs::metadata(it).and_then(|it| it.modified()).ok());
+    newest.map(|it| tail_of(&it, lines)).unwrap_or_default()
+}
+
+/// A long-lived thread's transcript runs to megabytes, so only its end is
+/// read.
+fn tail_of(transcript: &Path, lines: usize) -> Vec<String> {
+    let rendered = rendered(&logs::end_of(transcript, 256 * 1024));
+    let all: Vec<&str> = rendered.lines().filter(|it| !it.is_empty()).collect();
+    all[all.len().saturating_sub(lines)..].iter().map(|it| it.to_string()).collect()
 }
 
 /// A hand that hasn't been discarded still has its transcript in its
@@ -235,5 +253,19 @@ mod tests {
                         04:54:45    → Bash ls -la\n\
                         04:54:46    ✗ no such file\n";
         assert_eq!(rendered(&transcript), expected);
+    }
+
+    #[test]
+    fn the_tail_of_a_transcript_is_its_last_rendered_lines_without_blanks() {
+        let directory = std::env::temp_dir().join(format!("anna-tail-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let transcript = directory.join("session.jsonl");
+        let said = |minute: u32, text: &str| format!(r#"{{"type":"user","timestamp":"2026-09-22T04:{minute:02}:00.000Z","message":{{"content":"{text}"}}}}"#);
+        fs::write(&transcript, [said(1, "first"), said(2, "second"), said(3, "third")].join("\n")).unwrap();
+
+        assert_eq!(tail_of(&transcript, 2), ["04:02:00  > second", "04:03:00  > third"]);
+        assert_eq!(tail_of(&transcript, 10).len(), 3);
+        assert_eq!(tail_of(&directory.join("missing.jsonl"), 2), Vec::<String>::new());
+        fs::remove_dir_all(directory).unwrap();
     }
 }

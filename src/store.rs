@@ -502,15 +502,15 @@ mod tests {
     fn a_thread_sees_what_the_others_have_open_but_not_its_own() {
         let (store, directory) = store("work");
         store.claim_work(&origin("card-1"), "basecamp-card-1", "Login 500s on Safari", Some("frontdesk"), None, "t1").unwrap();
-        store.claim_work(&origin("card-2"), "basecamp-card-2", "Session cookie dropped", Some("frontdesk"), Some("30000000001"), "t2").unwrap();
+        store.claim_work(&origin("card-2"), "basecamp-card-2", "Session cookie dropped", Some("frontdesk"), Some("12345678901"), "t2").unwrap();
         store.claim_work(&origin("card-2"), "basecamp-card-2", "Session cookie dropped on Safari", None, None, "t3").unwrap();
 
         let seen_by_first = store.open_work_of_others(&origin("card-1")).unwrap();
         assert_eq!(seen_by_first.len(), 1);
         assert_eq!(seen_by_first[0].title, "Session cookie dropped on Safari");
         assert_eq!(seen_by_first[0].project, None);
-        assert_eq!(seen_by_first[0].about.as_deref(), Some("30000000001"), "claiming again without saying what it is about keeps what it was about");
-        assert_eq!(store.thread_working_on("30000000001").unwrap(), Some(("basecamp-card-2".to_string(), origin("card-2"))), "what is said on that to-do is card-2's to hear");
+        assert_eq!(seen_by_first[0].about.as_deref(), Some("12345678901"), "claiming again without saying what it is about keeps what it was about");
+        assert_eq!(store.thread_working_on("12345678901").unwrap(), Some(("basecamp-card-2".to_string(), origin("card-2"))), "what is said on that to-do is card-2's to hear");
         assert_eq!(store.thread_working_on("1").unwrap(), None);
         assert_eq!(store.origin_of_thread("basecamp-card-2").unwrap(), Some(origin("card-2")));
         assert_eq!(store.origin_of_thread("nobody").unwrap(), None);

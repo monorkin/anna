@@ -281,7 +281,7 @@ mod tests {
                 only_reads: remote_name == "shout",
                 trusted_only: false,
                 server: Arc::new(Mutex::new(Server::start(&fake_server()).unwrap())),
-                editor: Arc::new(Editor::new(None, judge.clone())),
+                editor: Arc::new(Editor::new(None, judge.clone(), crate::config::Chain::of(&["haiku"]))),
                 judge: judge.clone(),
                 held: Arc::new(HeldBack::default()),
             })
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn a_hand_is_only_granted_what_its_server_says_only_reads() {
-        let judge = Arc::new(Judge::Haiku);
+        let judge = Arc::new(Judge::claude("haiku"));
         let server = Arc::new(Mutex::new(Server::start(&fake_server()).unwrap()));
         let offered = |name: &str, only_reads: bool, prose_arguments: Vec<String>, trusted_only: bool| {
             Arc::new(Offered {
@@ -322,7 +322,7 @@ mod tests {
                 only_reads,
                 trusted_only,
                 server: server.clone(),
-                editor: Arc::new(Editor::new(None, judge.clone())),
+                editor: Arc::new(Editor::new(None, judge.clone(), crate::config::Chain::of(&["haiku"]))),
                 judge: judge.clone(),
                 held: Arc::new(HeldBack::default()),
             })
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn a_turn_has_spoken_once_something_for_people_went_out_through_a_tool() {
-        let judge = Arc::new(Judge::Haiku);
+        let judge = Arc::new(Judge::claude("haiku"));
         let server = Arc::new(Mutex::new(Server::start(&fake_server()).unwrap()));
         let offered = |prose_arguments: Vec<String>| {
             Arc::new(Offered {
@@ -367,7 +367,7 @@ mod tests {
                 only_reads: false,
                 trusted_only: false,
                 server: server.clone(),
-                editor: Arc::new(Editor::new(None, judge.clone())),
+                editor: Arc::new(Editor::new(None, judge.clone(), crate::config::Chain::of(&["haiku"]))),
                 judge: judge.clone(),
                 held: Arc::new(HeldBack::default()),
             })

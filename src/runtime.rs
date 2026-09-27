@@ -58,9 +58,9 @@ impl Runtime {
 
         let config = Config::load()?;
         claude::write_settings(&paths::claude_config_home())?;
-        let judge = Arc::new(Judge::with_whatever_is_set_up(&config));
+        let judge = Arc::new(Judge::with_whatever_is_set_up(&config)?);
         let style = config::style()?;
-        let editor = Arc::new(Editor::new(style.clone(), judge.clone()));
+        let editor = Arc::new(Editor::new(style.clone(), judge.clone(), config.models.editing.clone()));
         let personality = config::personality()?;
         let held = Arc::new(HeldBack::default());
         let catalog = Arc::new(Catalog::open(&config, editor.clone(), judge.clone(), held.clone()));
@@ -71,6 +71,7 @@ impl Runtime {
             time_limit: Duration::from_secs(config.minutes_per_run * 60),
             gitconfig: github::is_set_up().then(github::gitconfig),
             scopes: Outside::can_have_scopes(),
+            models: config.models.clone(),
         });
         if !outside.scopes {
             logs::event("sandbox.without_limits", json!({ "reason": "the user's systemd gave no scope" }));

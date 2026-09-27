@@ -613,10 +613,10 @@ mod tests {
     fn a_message_is_heard_as_whoever_spoke_last_there() {
         let notification = Message {
             id: "5:t".to_string(),
-            conversation: ".../recordings/30000000001/subscription.json".to_string(),
+            conversation: ".../recordings/12345678901/subscription.json".to_string(),
             sender: "10000001".to_string(),
             sender_name: Some("Sam".to_string()),
-            text: "Re: the to-do\n\nSam's first comment\n\nhttps://app.example.com/todos/30000000001".to_string(),
+            text: "Re: the to-do\n\nSam's first comment\n\nhttps://app.example.com/todos/12345678901".to_string(),
         };
         let spoken = source::Spoken { sender: "10000002".to_string(), sender_name: Some("Marta".to_string()), text: "go".to_string() };
         let heard = with_last_spoken(notification, spoken);
@@ -630,8 +630,8 @@ mod tests {
     #[test]
     fn a_conversations_recordings_are_read_from_its_name() {
         assert_eq!(
-            recording_ids_in("https://3.basecampapi.com/1000001/buckets/2000001/recordings/30000000001/subscription.json"),
-            ["1000001", "2000001", "30000000001"]
+            recording_ids_in("https://3.basecampapi.com/1234567/buckets/87654321/recordings/12345678901/subscription.json"),
+            ["1234567", "87654321", "12345678901"]
         );
         assert_eq!(recording_ids_in("30000000002"), ["30000000002"]);
         assert!(recording_ids_in("main").is_empty());

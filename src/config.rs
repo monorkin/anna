@@ -50,6 +50,80 @@ pub struct Config {
     /// and cut off at a hand's limit it would take the hand at work with it.
     #[serde(default = "six_hours")]
     pub minutes_per_thread_turn: u64,
+    #[serde(default)]
+    pub models: Models,
+}
+
+/// Which Claude model does what, by any name `claude --model` takes: an
+/// alias like "opus", which follows the newest one, or a full model id.
+/// Each is a list, tried in order: the next one takes over while the one
+/// before it has no allowance left.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Models {
+    /// Threads plan the work and decide who does what, so they get the most
+    /// capable model.
+    pub threads: Chain,
+    pub hands: Chain,
+    pub reviewers: Chain,
+    /// What judges untrusted text. Besides Claude models this takes "jev",
+    /// which is skipped while no Jev key is set up.
+    pub screening: Chain,
+    /// What rewrites her writing to her style.
+    pub editing: Chain,
+}
+
+pub const JEV: &str = "jev";
+
+impl Default for Models {
+    fn default() -> Models {
+        Models {
+            threads: Chain::of(&["fable", "opus"]),
+            hands: Chain::of(&["opus"]),
+            reviewers: Chain::of(&["opus"]),
+            screening: Chain::of(&[JEV, "haiku"]),
+            editing: Chain::of(&["haiku"]),
+        }
+    }
+}
+
+/// One model, or several to fall back through; never none.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Chain(Vec<String>);
+
+impl Chain {
+    pub fn of(models: &[&str]) -> Chain {
+        Chain(models.iter().map(|it| it.to_string()).collect())
+    }
+}
+
+impl std::ops::Deref for Chain {
+    type Target = [String];
+
+    fn deref(&self) -> &[String] {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Chain {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Chain, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Written {
+            One(String),
+            Several(Vec<String>),
+        }
+
+        let models = match Written::deserialize(deserializer)? {
+            Written::One(model) => vec![model],
+            Written::Several(models) => models,
+        };
+        if models.is_empty() {
+            Err(serde::de::Error::custom("a model list needs at least one model"))
+        } else {
+            Ok(Chain(models))
+        }
+    }
 }
 
 fn an_hour() -> u64 {
@@ -87,6 +161,7 @@ impl Default for Config {
             rotate_accounts: true,
             minutes_per_run: three_hours(),
             minutes_per_thread_turn: six_hours(),
+            models: Models::default(),
         }
     }
 }
@@ -326,5 +401,27 @@ mod tests {
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o666)).unwrap();
         assert!(Config::load_from(&path).is_err());
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn models_are_one_or_a_list_and_those_left_out_keep_their_defaults() {
+        let config: Config = serde_json::from_str(r#"{ "models": { "threads": "opus", "screening": ["sonnet", "haiku"] } }"#).unwrap();
+        assert_eq!(
+            config.models,
+            Models {
+                threads: Chain::of(&["opus"]),
+                hands: Chain::of(&["opus"]),
+                reviewers: Chain::of(&["opus"]),
+                screening: Chain::of(&["sonnet", "haiku"]),
+                editing: Chain::of(&["haiku"]),
+            }
+        );
+
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.models.threads, Chain::of(&["fable", "opus"]));
+        assert_eq!(config.models.screening, Chain::of(&["jev", "haiku"]));
+
+        let none = serde_json::from_str::<Config>(r#"{ "models": { "hands": [] } }"#).unwrap_err();
+        assert!(none.to_string().contains("at least one model"), "{none}");
     }
 }

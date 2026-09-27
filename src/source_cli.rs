@@ -23,8 +23,8 @@ pub fn check(name: &str) -> Result<()> {
         .get(name)
         .with_context(|| format!("there is no source called {name}"))?;
 
-    let judge = Arc::new(Judge::Haiku);
-    let editor = Arc::new(Editor::new(config::style()?, judge.clone()));
+    let judge = Arc::new(Judge::with_whatever_is_set_up(&config)?);
+    let editor = Arc::new(Editor::new(config::style()?, judge.clone(), config.models.editing.clone()));
     let catalog = Catalog::open(&config, editor, judge, Arc::new(HeldBack::default()));
 
     // Read from where she has got to, and the position left where it is

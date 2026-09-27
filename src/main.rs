@@ -7,6 +7,10 @@ mod clock;
 mod config;
 mod control;
 mod conversation;
+mod dash;
+mod dash_ansi;
+mod dash_data;
+mod dash_tables;
 mod deadline;
 mod dispatcher;
 mod editor;
@@ -74,6 +78,8 @@ enum Command {
     Restart,
     /// Show whether Anna is running and what she's listening on
     Status,
+    /// A dashboard in this terminal: her accounts, memory and work, what's going on, and a line to tell a thread something
+    Dash,
     /// Have Anna check a source now instead of at the next tick; all of them when none is named
     Poke { source: Option<String> },
     /// Run Anna in this terminal: listen on every source until stopped
@@ -251,6 +257,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Stop => lifecycle::stop(),
         Command::Restart => lifecycle::restart(),
         Command::Status => lifecycle::status(),
+        Command::Dash => dash::run(),
         Command::Poke { source } => lifecycle::poke(source.as_deref()),
         Command::Run => dispatcher::run(),
         Command::Backup { to, without_secrets } => backup::backup(to, without_secrets),

@@ -5,8 +5,9 @@
 
 use serde_json::{Value, json};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
@@ -31,6 +32,35 @@ pub fn event(name: &str, details: Value) {
         // and an append is only whole per write call
         let line = json!({ "at": clock::timestamp(), "event": name, "details": details }).to_string() + "\n";
         let _ = file.write_all(line.as_bytes());
+    }
+}
+
+/// The newest lines of the log, each as `anna log` shows it in colour, the
+/// newest last.
+pub fn newest_styled(count: usize) -> Vec<String> {
+    let look = Look { styled: true, only: None };
+    let end = end_of(&paths::log_file(), 256 * 1024);
+    let rendered: Vec<String> = end.lines().filter_map(|it| look.render(it)).collect();
+    rendered[rendered.len().saturating_sub(count)..].to_vec()
+}
+
+/// At most the last `bytes` of a file of lines, from the first whole line
+/// in them on.
+pub fn end_of(file: &Path, bytes: u64) -> String {
+    let Ok(mut opened) = File::open(file) else {
+        return String::new();
+    };
+    let start = opened.metadata().map(|it| it.len()).unwrap_or(0).saturating_sub(bytes);
+    let mut end = Vec::new();
+    if opened.seek(SeekFrom::Start(start)).is_err() || opened.read_to_end(&mut end).is_err() {
+        return String::new();
+    }
+
+    let text = String::from_utf8_lossy(&end).into_owned();
+    if start == 0 {
+        text
+    } else {
+        text.split_once('\n').map(|(_, whole)| whole.to_string()).unwrap_or_default()
     }
 }
 
@@ -114,7 +144,7 @@ impl Look {
         let at = at.get(11..19).unwrap_or(at);
 
         if self.styled {
-            Some(format!("{DIM}{at}{PLAIN}  {CYAN}{who:<18}{PLAIN}  {}{event:<24}{PLAIN}  {rest}", colour_of(event)))
+            Some(format!("{DIM}{at}{PLAIN}  {CYAN}{who:<18}{PLAIN}  {}{event:<24}{PLAIN}  {rest}", colour_of(event, &entry["details"])))
         } else {
             Some(format!("{at}  {who:<18}  {event:<24}  {rest}"))
         }
@@ -125,7 +155,7 @@ const WHO_KEYS: [&str; 4] = ["hand", "by", "thread", "conversation"];
 
 /// An id short enough for a column: the first part and the last few
 /// characters of a long one.
-fn short_id(id: &str) -> String {
+pub fn short_id(id: &str) -> String {
     if id.chars().count() <= 18 {
         id.to_string()
     } else {
@@ -135,16 +165,21 @@ fn short_id(id: &str) -> String {
     }
 }
 
-fn colour_of(event: &str) -> &'static str {
-    if event.ends_with(".failed") || event.ends_with(".refused") || event.ends_with(".withheld") || event.ends_with(".dropped") {
+/// Red for what went wrong, yellow for what fell short or was let go, green
+/// for what began or came back good, dim for the routine. A review is
+/// coloured by its verdict.
+fn colour_of(event: &str, details: &Value) -> &'static str {
+    let rejected = event == "review.finished" && details["accepted"] == false;
+    let accepted = event == "review.finished" && details["accepted"] == true;
+    if rejected || [".failed", ".refused", ".rejected", ".withheld", ".dropped"].iter().any(|it| event.ends_with(it)) {
         RED
-    } else if event.contains("waiting") || event.contains("out_of_time") || event.contains("without") || event.contains("unchecked") || event.contains("ignored") || event.contains("left_out") {
+    } else if ["waiting", "out_of_time", "without", "unchecked", "ignored", "left_out", "discarded", "fell_back"].iter().any(|it| event.contains(it)) {
         YELLOW
-    } else if event.ends_with(".woken") || event.ends_with(".started") || event.ends_with(".listening") {
+    } else if accepted || [".woken", ".started", ".listening", ".reported"].iter().any(|it| event.ends_with(it)) {
         GREEN
-    } else if event.starts_with("broker.") || event.starts_with("proxy.") {
+    } else if event.starts_with("broker.") || event.starts_with("proxy.") || event.ends_with(".slept") {
         DIM
-    } else if event.ends_with(".finished") || event.ends_with(".slept") || event.ends_with(".claimed") {
+    } else if event.ends_with(".finished") || event.ends_with(".claimed") {
         MAGENTA
     } else {
         BOLD
@@ -172,5 +207,35 @@ mod tests {
 
         let styled = Look { styled: true, only: None };
         assert!(styled.render(line).unwrap().contains(GREEN));
+    }
+
+    #[test]
+    fn events_are_coloured_by_how_they_went() {
+        let none = Value::Null;
+        assert_eq!(colour_of("broker.refused", &none), RED);
+        assert_eq!(colour_of("editor.rejected", &none), RED);
+        assert_eq!(colour_of("review.finished", &json!({ "accepted": false })), RED);
+        assert_eq!(colour_of("hand.discarded", &none), YELLOW);
+        assert_eq!(colour_of("judge.fell_back", &none), YELLOW);
+        assert_eq!(colour_of("turn.out_of_time", &none), YELLOW);
+        assert_eq!(colour_of("review.finished", &json!({ "accepted": true })), GREEN);
+        assert_eq!(colour_of("hand.reported", &none), GREEN);
+        assert_eq!(colour_of("thread.woken", &none), GREEN);
+        assert_eq!(colour_of("thread.slept", &none), DIM);
+        assert_eq!(colour_of("work.claimed", &none), MAGENTA);
+        assert_eq!(colour_of("schedule.added", &none), BOLD);
+    }
+
+    #[test]
+    fn the_end_of_a_file_starts_at_a_whole_line() {
+        let directory = std::env::temp_dir().join(format!("anna-end-of-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("log.jsonl");
+        std::fs::write(&file, "first line\nsecond\nthird\n").unwrap();
+
+        assert_eq!(end_of(&file, 12), "third\n", "the cut-through \"second\" is left out");
+        assert_eq!(end_of(&file, 1_000), "first line\nsecond\nthird\n");
+        assert_eq!(end_of(&directory.join("missing"), 10), "");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -370,7 +370,7 @@ mod tests {
     fn replies_land_in_the_conversation() {
         let conversation = Arc::new(Recorded { said: Mutex::new(Vec::new()) });
         let spoke = Arc::new(AtomicBool::new(false));
-        let editor = Arc::new(Editor::new(None, Arc::new(crate::judge::Judge::Haiku)));
+        let editor = Arc::new(Editor::new(None, Arc::new(crate::judge::Judge::claude("haiku")), crate::config::Chain::of(&["haiku"])));
         let reply = Reply { conversation: conversation.clone(), editor, sent_back: Arc::default(), spoke: spoke.clone() };
 
         assert!(reply.call(&json!({ "text": "  " })).is_err());

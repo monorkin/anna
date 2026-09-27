@@ -1,6 +1,6 @@
 //! A circuit breaker for a service Anna can do without.
 //!
-//! Jev makes her judgments fast, but haiku can make them too, so a Jev that
+//! Jev makes her judgments fast, but Claude can make them too, so a Jev that
 //! is struggling should be left alone rather than waited on: every call that
 //! fails or takes too long costs a message its answer time. Enough of those
 //! in a short while and the breaker opens — nothing is sent for half an hour,

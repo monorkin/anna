@@ -89,6 +89,8 @@ Work another thread has on the board is that thread's to finish, and that thread
 Work you pick up is work someone is waiting on, so say you have it as you claim it: one line, what you're doing, before the first hand. That one line is the whole of it — no running commentary, nothing said again in other words, nothing until you have something they need. \
 When something can't be done, say what you tried and what you can do instead.";
 
+const ON_ANOTHER_MODEL: &str = "\n\n(Your last try at this stopped part way because the Claude allowance for the model you were on ran out, and you are carrying on with another one. The limit message in your history is that, not a limit of any tool you were using. Look at what you already did before doing it again.)";
+
 /// One turn. Answers with what the thread has to be woken with next, when
 /// the turn ended in a way only the thread itself can tell the person about.
 pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: Standing, message: &str) -> Result<Option<String>> {
@@ -141,20 +143,29 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
     let mut message = with_the_board(runtime, conversation.as_ref(), message);
     let role = role(runtime, standing, answered_otherwise.as_deref());
     let time_limit = Duration::from_secs(runtime.config.minutes_per_thread_turn * 60);
-    let mut command = turn(&directory, &endpoint, &session, standing, &role, time_limit)?;
-    memory.cover(&mut command);
+    let outcome = claude::on_each_model(&runtime.config.models.threads, |model, after_another| {
+        if after_another {
+            // The model before it ran out part way through, in this session
+            session.begun = true;
+            message = format!("{message}{ON_ANOTHER_MODEL}");
+        }
+        let mut command = turn(&directory, &endpoint, &session, standing, &role, model, time_limit)?;
+        memory.cover(&mut command);
 
-    let mut outcome = claude::reply_of(&mut command, &message, time_limit, None);
-    if session.begun && outcome.as_ref().is_err_and(claude::says_the_session_is_gone) {
-        // Claude's folder no longer has the session — it moved, or was
-        // cleaned out — so the conversation starts over, and says so
-        logs::event("thread.session_gone", json!({ "conversation": key, "session": session.id }));
-        session = Session::fresh(&directory)?;
-        message = format!("{message}\n\n(Your earlier session in this conversation is gone, so you are starting from here without its history.)");
-        let mut again = turn(&directory, &endpoint, &session, standing, &role, time_limit)?;
-        memory.cover(&mut again);
-        outcome = claude::reply_of(&mut again, &message, time_limit, None);
-    }
+        let outcome = claude::reply_of(&mut command, &message, time_limit, None);
+        if session.begun && outcome.as_ref().is_err_and(claude::says_the_session_is_gone) {
+            // Claude's folder no longer has the session — it moved, or was
+            // cleaned out — so the conversation starts over, and says so
+            logs::event("thread.session_gone", json!({ "conversation": key, "session": session.id }));
+            session = Session::fresh(&directory)?;
+            message = format!("{message}\n\n(Your earlier session in this conversation is gone, so you are starting from here without its history.)");
+            let mut again = turn(&directory, &endpoint, &session, standing, &role, model, time_limit)?;
+            memory.cover(&mut again);
+            claude::reply_of(&mut again, &message, time_limit, None)
+        } else {
+            outcome
+        }
+    });
     memory.finish();
     hands.discard_all();
 
@@ -271,6 +282,7 @@ fn turn(
     session: &Session,
     standing: Standing,
     role: &str,
+    model: &str,
     time_limit: Duration,
 ) -> Result<Command> {
     let waiting = waiting_out(time_limit);
@@ -282,6 +294,7 @@ fn turn(
         .env("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", &waiting)
         .envs(github::environment())
         .args(["--dangerously-skip-permissions", "--strict-mcp-config"])
+        .args(["--model", model])
         .args(["--mcp-config", &broker::mcp_config(endpoint.socket())])
         .args(["--append-system-prompt", role]);
     if standing == Standing::CanAssignWork {

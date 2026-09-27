@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use crate::config::Models;
 use crate::deadline;
 use crate::paths;
 use crate::toolchains::Toolchains;
@@ -81,6 +82,7 @@ pub struct Outside {
     /// have, so a hand that forks without end or eats all the memory takes
     /// itself down and not the machine Anna runs on.
     pub scopes: bool,
+    pub models: Models,
 }
 
 /// Shares of the machine's memory, which systemd takes as percentages. A
@@ -382,6 +384,7 @@ mod tests {
             time_limit: Duration::from_secs(60),
             gitconfig: None,
             scopes: false,
+            models: Models::default(),
         };
         let arguments = arguments_of(&Sandbox {
             project: project.clone(),
@@ -462,6 +465,7 @@ mod tests {
             time_limit: Duration::from_secs(60),
             gitconfig: None,
             scopes: Outside::can_have_scopes(),
+            models: Models::default(),
         };
         let build_dir = root.join("build");
         fs::create_dir_all(&build_dir).unwrap();
@@ -528,6 +532,7 @@ mod tests {
             time_limit: Duration::from_secs(60),
             gitconfig: None,
             scopes: Outside::can_have_scopes(),
+            models: Models::default(),
         };
         let run = |project: &Path, script: &str| {
             let sandbox = Sandbox {
@@ -613,7 +618,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        let outside = Outside { proxy_socket: root.join("proxy.sock"), toolchains, time_limit: Duration::from_secs(60), gitconfig: None, scopes: Outside::can_have_scopes() };
+        let outside = Outside { proxy_socket: root.join("proxy.sock"), toolchains, time_limit: Duration::from_secs(60), gitconfig: None, scopes: Outside::can_have_scopes(), models: Models::default() };
         let sandbox = Sandbox {
             project: project.clone(),
             profile: root.join("profile"),
@@ -647,6 +652,7 @@ mod tests {
             time_limit: Duration::from_secs(60),
             gitconfig: None,
             scopes: false,
+            models: Models::default(),
         };
         let sandbox = |writable| Sandbox {
             project: PathBuf::from("/srv/project"),
@@ -683,6 +689,7 @@ mod tests {
             time_limit: Duration::from_secs(60),
             gitconfig: Some(PathBuf::from("/home/someone/.config/anna/tools/gitconfig")),
             scopes: true,
+            models: Models::default(),
         };
         let arguments = arguments_of(&Sandbox {
             project: PathBuf::from("/home/someone/project"),

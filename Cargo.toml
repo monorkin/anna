@@ -21,3 +21,5 @@ serde_json = "1.0.151"
 ureq = { version = "3.4.0", features = ["json"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 usage = { version = "6", package = "usage-rs", features = ["completions"] }
+# `anna dash`; crossterm comes with it, as `ratatui::crossterm`
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }

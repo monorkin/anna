@@ -20,6 +20,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::fsutil;
+use crate::logs;
 use crate::paths;
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +165,23 @@ impl std::fmt::Display for OutOfQuota {
 
 impl std::error::Error for OutOfQuota {}
 
+/// A run on each model in turn, for as long as the one before it is out of
+/// quota. The run is told whether an earlier model already had a go, so it
+/// can pick up from where that one stopped.
+pub fn on_each_model<T>(models: &[String], mut run: impl FnMut(&str, bool) -> Result<T>) -> Result<T> {
+    let mut outcome = run(&models[0], false);
+    for (before, model) in models.iter().zip(&models[1..]) {
+        match &outcome {
+            Err(error) if error.downcast_ref::<OutOfQuota>().is_some() => {
+                logs::event("claude.fell_back", json!({ "from": before, "to": model, "because": format!("{error:#}") }));
+                outcome = run(model, true);
+            }
+            _ => break,
+        }
+    }
+    outcome
+}
+
 /// A resume that found nothing: "No conversation found with session ID …".
 pub fn says_the_session_is_gone(error: &anyhow::Error) -> bool {
     format!("{error:#}").contains("No conversation found with session ID")
@@ -171,9 +189,12 @@ pub fn says_the_session_is_gone(error: &anyhow::Error) -> bool {
 
 /// Claude Code refreshes her login now and then, and the token a session
 /// held until then is refused from that moment: "401 OAuth access token has
-/// been revoked". The session itself is whole and goes on with the new one.
-pub fn says_the_login_was_revoked(error: &anyhow::Error) -> bool {
-    format!("{error:#}").contains("access token has been revoked")
+/// been revoked". A hand's copy has no refresh token either, so one that
+/// outlives its access token is told "has expired". Either way the session
+/// itself is whole and goes on with her current one.
+pub fn says_the_login_went_stale(error: &anyhow::Error) -> bool {
+    let error = format!("{error:#}");
+    error.contains("access token has been revoked") || error.contains("access token has expired")
 }
 
 /// A session id Claude Code will take, made here so a session can be
@@ -285,13 +306,13 @@ fn parent_in(stat: &str) -> Option<libc::pid_t> {
 
 /// Judging and editing sit in front of every message in and out, outside the
 /// time a run is given, so they get a limit of their own.
-const SECONDS_FOR_HAIKU: u64 = 180;
+const SECONDS_TO_ANSWER: u64 = 180;
 
-/// One question to haiku about a text, with the text on stdin where it reads
-/// as data. No tools beyond Read, no MCP, run from a temp folder.
-pub fn ask_haiku(prompt: &str, text: &str) -> Result<String> {
+/// One question to a model about a text, with the text on stdin where it
+/// reads as data. No tools beyond Read, no MCP, run from a temp folder.
+pub fn ask(model: &str, prompt: &str, text: &str) -> Result<String> {
     let mut child = Command::new(binary()?)
-        .args(["-p", prompt, "--model", "haiku"])
+        .args(["-p", prompt, "--model", model])
         .args(["--restricted", "--tools", "Read", "--strict-mcp-config", "--disable-slash-commands"])
         .args(["--output-format", "json"])
         .env("CLAUDE_CONFIG_DIR", paths::claude_config_home())
@@ -301,16 +322,19 @@ pub fn ask_haiku(prompt: &str, text: &str) -> Result<String> {
         .stderr(Stdio::null())
         .spawn()
         .context("could not run claude")?;
-    let watch = Watch::over(child.id(), Duration::from_secs(SECONDS_FOR_HAIKU));
+    let watch = Watch::over(child.id(), Duration::from_secs(SECONDS_TO_ANSWER));
     child.stdin.take().context("claude has no stdin")?.write_all(text.as_bytes())?;
 
     let output = child.wait_with_output()?;
     if watch.ran_out() {
-        bail!("haiku did not answer within {SECONDS_FOR_HAIKU} seconds");
+        bail!("{model} did not answer within {SECONDS_TO_ANSWER} seconds");
     }
-    let reply: Reply = serde_json::from_slice(&output.stdout).context("haiku gave no readable reply")?;
+    let reply: Reply = serde_json::from_slice(&output.stdout).with_context(|| format!("{model} gave no readable reply"))?;
+    if reply.is_error && says_the_subscription_is_used_up(&reply.result) {
+        return Err(OutOfQuota { said: reply.result }.into());
+    }
     if reply.is_error {
-        bail!("haiku reported an error: {}", reply.result);
+        bail!("{model} reported an error: {}", reply.result);
     }
     Ok(reply.result)
 }
@@ -446,9 +470,37 @@ mod tests {
     }
 
     #[test]
-    fn a_revoked_login_is_told_apart_from_other_failures() {
-        assert!(says_the_login_was_revoked(&anyhow::anyhow!("claude reported an error: Failed to authenticate. API Error: 401 OAuth access token has been revoked.")));
-        assert!(!says_the_login_was_revoked(&anyhow::anyhow!("claude exited with signal: 9 (SIGKILL)")));
+    fn the_next_model_takes_over_only_while_the_one_before_it_is_out_of_quota() {
+        let models = ["fable".to_string(), "opus".to_string(), "sonnet".to_string()];
+        let tried = std::cell::RefCell::new(Vec::new());
+        let used_up = |model: &str| OutOfQuota { said: format!("You've hit your {model} limit · resets 8pm") };
+
+        let answer = on_each_model(&models, |model, after_another| {
+            tried.borrow_mut().push((model.to_string(), after_another));
+            match model {
+                "fable" => Err(used_up(model).into()),
+                _ => Ok(model.to_string()),
+            }
+        });
+        assert_eq!(answer.unwrap(), "opus");
+        assert_eq!(tried.take(), [("fable".to_string(), false), ("opus".to_string(), true)]);
+
+        let broken = on_each_model(&models, |model, _| -> Result<()> {
+            tried.borrow_mut().push((model.to_string(), false));
+            bail!("claude exited with signal: 9 (SIGKILL)")
+        });
+        assert!(broken.is_err());
+        assert_eq!(tried.take().len(), 1, "any other failure is not the model's allowance");
+
+        let all_out = on_each_model(&models, |model, _| -> Result<()> { Err(used_up(model).into()) });
+        assert!(all_out.unwrap_err().downcast_ref::<OutOfQuota>().is_some(), "with every one used up it is a wait, as before");
+    }
+
+    #[test]
+    fn a_revoked_or_expired_login_is_told_apart_from_other_failures() {
+        assert!(says_the_login_went_stale(&anyhow::anyhow!("claude reported an error: Failed to authenticate. API Error: 401 OAuth access token has been revoked.")));
+        assert!(says_the_login_went_stale(&anyhow::anyhow!("claude reported an error: Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.")));
+        assert!(!says_the_login_went_stale(&anyhow::anyhow!("claude exited with signal: 9 (SIGKILL)")));
         let id = random_session_id().unwrap();
         assert_eq!(id.len(), 36);
         assert_eq!(&id[14..15], "4");

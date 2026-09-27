@@ -228,7 +228,7 @@ impl Wizard<'_> {
         let hint = format!("{agent} can use Jev to make quick judgements instead of using Claude.");
         let already = self.doing.has_secret(config::JEV_API_KEY);
         if !self.asking.yes(&Question { title: "Improved efficiency", question: &question, hint: &hint }, already)? {
-            return self.asking.done(&format!("{agent} will ask Claude's haiku instead."));
+            return self.asking.done(&format!("{agent} will ask Claude instead."));
         }
         if already {
             self.asking.note("  A key is already stored; enter keeps it.")?;

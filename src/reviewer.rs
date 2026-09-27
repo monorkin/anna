@@ -52,11 +52,15 @@ pub fn review(hand: &Hand, brief: &str, report: &str, outside: &Outside, started
         registries: None,
         scratch: directory.clone(),
     };
-    let mut command = sandbox.claude(&claude::binary()?);
-    command.args(["--dangerously-skip-permissions", "--strict-mcp-config", "--tools", sandbox.tools()]);
-    command.args(["--append-system-prompt", &hand::what_it_can_reach(hand.services(), false)]);
-
-    let outcome = claude::reply_of(&mut command, &prompt(brief, report), outside.time_limit, Some(started));
+    // A review that ran out of allowance starts over on the next model: it
+    // has no session to go on with, and nothing it did is kept
+    let outcome = claude::on_each_model(&outside.models.reviewers, |model, _| {
+        let mut command = sandbox.claude(&claude::binary()?);
+        command.args(["--dangerously-skip-permissions", "--strict-mcp-config", "--tools", sandbox.tools()]);
+        command.args(["--model", model]);
+        command.args(["--append-system-prompt", &hand::what_it_can_reach(hand.services(), false)]);
+        claude::reply_of(&mut command, &prompt(brief, report), outside.time_limit, Some(started))
+    });
     transcripts::keep(&directory.join("profile"), hand_id, true);
     let _ = fs::remove_dir_all(&directory);
 
