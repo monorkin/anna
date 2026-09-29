@@ -19,6 +19,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use crate::deadline;
 use crate::fsutil;
 use crate::logs;
 use crate::paths;
@@ -35,11 +36,36 @@ pub struct Reply {
     pub num_turns: Option<u32>,
 }
 
+/// Claude Code itself, never what stands in front of it on the PATH. A mise
+/// shim, or a wrapper script that runs mise, works here and not in a
+/// sandbox, which has no home, no mise config and no network — every hand
+/// would die on startup. For those, mise is asked from the home folder where
+/// the installed binary is, as it is for the hands' toolchains.
 pub fn binary() -> Result<PathBuf> {
-    paths::program("claude")
+    let found = paths::program("claude")
         .context("claude is not on the PATH")?
         .canonicalize()
-        .context("could not resolve the claude binary")
+        .context("could not resolve the claude binary")?;
+    if is_claude_itself(&found) {
+        Ok(found)
+    } else {
+        installed_by_mise().with_context(|| format!("{} stands in front of claude, and mise doesn't say where claude is", found.display()))
+    }
+}
+
+/// A program rather than a script, and not mise, which a shim resolves to.
+fn is_claude_itself(path: &Path) -> bool {
+    let mut magic = [0; 4];
+    let is_a_program = fs::File::open(path).and_then(|mut it| it.read_exact(&mut magic)).is_ok() && &magic == b"\x7fELF";
+    is_a_program && path.file_name().is_some_and(|it| it != "mise")
+}
+
+fn installed_by_mise() -> Option<PathBuf> {
+    let mut which = Command::new(paths::program("mise")?);
+    which.args(["which", "claude"]).current_dir(dirs::home_dir()?);
+    let output = deadline::output_within(&mut which, Duration::from_secs(15))?;
+    let installed = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()).canonicalize().ok()?;
+    is_claude_itself(&installed).then_some(installed)
 }
 
 /// A run that was stopped because it used up the time it is allowed. This is
@@ -517,6 +543,23 @@ mod tests {
         let id = random_session_id().unwrap();
         assert_eq!(id.len(), 36);
         assert_eq!(&id[14..15], "4");
+    }
+
+    #[test]
+    fn a_wrapper_or_a_shim_in_front_of_claude_is_not_claude() {
+        let folder = std::env::temp_dir().join(format!("anna-claude-binary-{}", std::process::id()));
+        fs::create_dir_all(&folder).unwrap();
+        let program = std::env::current_exe().unwrap();
+
+        fs::copy(&program, folder.join("claude")).unwrap();
+        fs::copy(&program, folder.join("mise")).unwrap();
+        fs::write(folder.join("wrapper"), "#!/bin/bash\nmise use -g --quiet claude || exit 1\nexec mise x claude -- claude \"$@\"\n").unwrap();
+
+        assert!(is_claude_itself(&folder.join("claude")));
+        assert!(!is_claude_itself(&folder.join("wrapper")), "omarchy's wrapper runs mise, which fails in a sandbox");
+        assert!(!is_claude_itself(&folder.join("mise")), "a mise shim resolves to mise");
+        assert!(!is_claude_itself(&folder.join("missing")));
+        fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]

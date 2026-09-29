@@ -227,7 +227,8 @@ impl Sandbox<'_> {
             .args(["--setenv", "CARGO_TARGET_DIR", BUILD_INSIDE])
             .args(["--setenv", "CARGO_HOME", CARGO_INSIDE])
             .args(["--setenv", "CARGO_BUILD_JOBS", &build_jobs().to_string()])
-            .args(["--setenv", "GIT_TERMINAL_PROMPT", "0"]);
+            .args(["--setenv", "GIT_TERMINAL_PROMPT", "0"])
+            .args(["--setenv", "MISE_TRUSTED_CONFIG_PATHS", &self.trusted_by_mise()]);
         if self.registries.is_none() {
             command.args(WORKS_OFFLINE.iter().flat_map(|(name, value)| ["--setenv", name, value]));
         }
@@ -310,6 +311,17 @@ impl Sandbox<'_> {
                 command.arg("--ro-bind").arg(&git).arg(&git);
             }
         }
+    }
+
+    /// The person's `mise trust` lives in a home the sandbox doesn't have,
+    /// and a mise that doesn't trust the project's config refuses to start
+    /// anything at all. A session runs the project's code either way, so
+    /// its config is trusted in here — and in a worktree, the repository's
+    /// too, because mise reads the configs of the folders above it.
+    fn trusted_by_mise(&self) -> String {
+        let mut trusted = vec![self.project.clone()];
+        trusted.extend(repository_holding(&self.project));
+        trusted.iter().map(|it| it.display().to_string()).collect::<Vec<_>>().join(":")
     }
 }
 
@@ -561,6 +573,10 @@ mod tests {
         assert_eq!(said.lines().collect::<Vec<_>>(), ["done", "refused"], "{said}");
         assert_eq!(git(&["log", "-1", "--format=%s", "outside"]).trim(), "Made in the worktree");
 
+        let worktree = project.join(".claude/worktrees/outside");
+        let said = run(&worktree, "echo $MISE_TRUSTED_CONFIG_PATHS");
+        assert_eq!(said.trim(), format!("{}:{}", worktree.display(), project.display()), "mise trusts the worktree and the repository above it");
+
         // A .git file a hand rewrote to point at some other repository
         let elsewhere = root.join("elsewhere");
         fs::create_dir_all(&elsewhere).unwrap();
@@ -716,5 +732,6 @@ mod tests {
         }));
         assert!(binds(&arguments, "--ro-bind").contains(&("/home/someone/project", "/home/someone/project")));
         assert!(binds(&arguments, "--ro-bind").contains(&("/run/anna/hand-h1.sock", BROKER_INSIDE)));
+        assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "MISE_TRUSTED_CONFIG_PATHS" && it[2] == "/home/someone/project"));
     }
 }

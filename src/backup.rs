@@ -2,11 +2,14 @@
 //! Anna, in one zip.
 //!
 //! What goes in: the config with her style and CLAUDE.md, her tokens and the
-//! Claude accounts she rotates between, the config of the tools she has her
-//! own profile in, the database of schedules and the work board, which messages each source has
+//! Claude accounts she rotates between, the Claude Code folder she works
+//! from with its settings and skills, the config of the tools she has her
+//! own profile in and the logins those tools keep in the keyring, the
+//! database of schedules and the work board, which messages each source has
 //! already seen, the log, every thread's session and the Claude transcript
 //! behind it — without those a restored thread would have forgotten its
-//! conversation — and an export of what she has learned.
+//! conversation — an export of what she has learned, and whether she ran as
+//! a service. The projects she works on are not hers, and stay out.
 //!
 //! A backup can be taken while she runs. The database is the only file that
 //! could be caught mid-write, and it is snapshotted through SQLite rather
@@ -34,14 +37,35 @@ use crate::control;
 use crate::fsutil;
 use crate::paths;
 use crate::secrets;
+use crate::service;
 use crate::store::Store;
 use crate::transcripts;
 
 const MANIFEST: &str = "manifest.json";
 const SECRETS: &str = "secrets.json";
 const MEMORY: &str = "memory.zip";
+const TOOL_LOGINS: &str = "tool-logins.json";
 const CONFIG_FILES: [&str; 3] = ["config.json", "style.md", "CLAUDE.md"];
 const SECRET_NAMES: [&str; 1] = [config::JEV_API_KEY];
+/// What Claude Code makes for itself in her folder as it runs. Transcripts
+/// are under `projects`, and go in by thread instead.
+const CLAUDE_CODES_OWN: [&str; 14] = [
+    "projects",
+    "cache",
+    "shell-snapshots",
+    "session-env",
+    "sessions",
+    "backups",
+    "statsig",
+    "todos",
+    "debug",
+    "file-history",
+    "paste-cache",
+    "telemetry",
+    "ide",
+    ".last-cleanup",
+];
+const CLAUDE_LOGIN: &str = ".credentials.json";
 
 pub fn backup(to: Option<PathBuf>, without_secrets: bool) -> Result<()> {
     let path = to.unwrap_or_else(|| PathBuf::from(format!("anna-backup-{}.zip", clock::timestamp().replace(':', ""))));
@@ -54,6 +78,7 @@ pub fn backup(to: Option<PathBuf>, without_secrets: bool) -> Result<()> {
 
     let mut archive = Archive { zip: ZipWriter::new(file), entries: 0 };
     archive.add_config()?;
+    archive.add_claude_profile(!without_secrets)?;
     if !without_secrets {
         archive.add_secrets()?;
         archive.add_logins()?;
@@ -79,6 +104,7 @@ fn manifest(without_secrets: bool) -> Value {
         "anna": env!("CARGO_PKG_VERSION"),
         "created": clock::timestamp(),
         "secrets": !without_secrets,
+        "service": service::installed(),
     })
 }
 
@@ -95,15 +121,36 @@ impl Archive {
         Ok(())
     }
 
-    /// The Claude accounts she rotates between, and the config of the tools
-    /// she has a profile of her own in. Both are logins — a tool without a
-    /// keyring keeps its credentials right there in a file — so they go
-    /// wherever her tokens go and stay out when those do. What a tool did
-    /// put in the keyring can't be exported, so after a restore on another
-    /// machine it needs logging in again.
+    /// The Claude Code folder she works from: her settings, the skills that
+    /// describe her tools, and — with her tokens — the account it is logged
+    /// into. Not what Claude Code makes for itself as it runs.
+    fn add_claude_profile(&mut self, with_login: bool) -> Result<()> {
+        let profile = paths::claude_config_home();
+        for name in names_in(&profile).into_iter().filter(|it| is_part_of_her_profile(it, with_login)) {
+            let path = profile.join(&name);
+            let kind = fs::symlink_metadata(&path)?.file_type();
+            if kind.is_dir() {
+                self.add_tree(&path, &format!("claude/{name}"))?;
+            } else if kind.is_file() {
+                self.add_file_if_there(&path, &format!("claude/{name}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The Claude accounts she rotates between, the config of the tools she
+    /// has a profile of her own in, and the logins those tools keep in the
+    /// keyring. All of them are logins — a tool without a keyring keeps its
+    /// credentials right there in a file — so they go wherever her tokens go
+    /// and stay out when those do.
     fn add_logins(&mut self) -> Result<()> {
         self.add_tree(&paths::accounts_dir(), "config/ax")?;
-        self.add_tree(&paths::tools_config_home(), "config/tools")
+        self.add_tree(&paths::tools_config_home(), "config/tools")?;
+        let tool_logins = secrets::tool_logins();
+        if !tool_logins.is_empty() {
+            self.add(TOOL_LOGINS, serde_json::to_string_pretty(&tool_logins)?.as_bytes())?;
+        }
+        Ok(())
     }
 
     /// From wherever each one lives — keyring or file — so restoring doesn't
@@ -239,6 +286,15 @@ pub fn restore(path: &Path, force: bool) -> Result<()> {
                 secrets::store(&secret, &value)?;
             }
             restored += 1;
+        } else if name == TOOL_LOGINS {
+            // One login that can't be put back leaves that tool to be logged
+            // into again; it is no reason to stop halfway through her files
+            for login in serde_json::from_slice::<Vec<secrets::ToolLogin>>(&contents)? {
+                if let Err(error) = secrets::restore_tool_login(&login) {
+                    eprintln!("{} is logged out of {} here: {error:#}.", login.username, login.service);
+                }
+            }
+            restored += 1;
         } else if name == MEMORY {
             restore_memory(&contents)?;
             restored += 1;
@@ -249,6 +305,10 @@ pub fn restore(path: &Path, force: bool) -> Result<()> {
     }
 
     println!("Restored {restored} files from the backup of {}.", manifest["created"].as_str().unwrap_or("an unknown time"));
+    if manifest["service"] == json!(true) && !service::installed() {
+        service::install(&config::Config::load()?.name, true)?;
+        println!("She ran as a service where the backup was made, and does here too.");
+    }
     println!("`anna start` brings her back up.");
     Ok(())
 }
@@ -272,6 +332,7 @@ fn destination_of(name: &str) -> Result<Option<PathBuf>> {
     let destination = match parts.next().as_deref() {
         Some("config") => Some(paths::config_dir().join(parts.collect::<PathBuf>())),
         Some("data") => Some(paths::data_dir().join(parts.collect::<PathBuf>())),
+        Some("claude") => Some(paths::claude_config_home().join(parts.collect::<PathBuf>())),
         Some("transcripts") => parts
             .next()
             .map(|thread| transcripts::of_thread(&thread).join(parts.collect::<PathBuf>())),
@@ -349,6 +410,10 @@ fn staging(name: &str) -> Result<PathBuf> {
     Ok(directory.join(format!("{}-{name}", std::process::id())))
 }
 
+fn is_part_of_her_profile(name: &str, with_login: bool) -> bool {
+    !CLAUDE_CODES_OWN.contains(&name) && (with_login || name != CLAUDE_LOGIN)
+}
+
 fn names_in(directory: &Path) -> Vec<String> {
     match fs::read_dir(directory) {
         Ok(entries) => entries.flatten().map(|it| it.file_name().to_string_lossy().into_owned()).collect(),
@@ -371,11 +436,24 @@ mod tests {
             destination_of("transcripts/terminal-main/abc.jsonl").unwrap(),
             Some(transcripts::of_thread("terminal-main").join("abc.jsonl"))
         );
+        assert_eq!(destination_of("claude/skills/basecamp/SKILL.md").unwrap(), Some(paths::claude_config_home().join("skills/basecamp/SKILL.md")));
         assert_eq!(destination_of("manifest.json").unwrap(), None);
         assert_eq!(destination_of("something/else").unwrap(), None);
 
         assert!(destination_of("config/../../.ssh/authorized_keys").is_err());
         assert!(destination_of("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn her_claude_profile_is_her_settings_and_skills_and_not_claude_codes_own_files() {
+        for hers in ["settings.json", "skills", "plugins", ".claude.json"] {
+            assert!(is_part_of_her_profile(hers, false), "{hers}");
+        }
+        for its_own in ["projects", "cache", "shell-snapshots", "sessions", "backups"] {
+            assert!(!is_part_of_her_profile(its_own, true), "{its_own}");
+        }
+        assert!(is_part_of_her_profile(".credentials.json", true));
+        assert!(!is_part_of_her_profile(".credentials.json", false), "her login stays out when her tokens do");
     }
 
     #[test]
