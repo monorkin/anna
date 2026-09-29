@@ -52,14 +52,34 @@ pub fn review(hand: &Hand, brief: &str, report: &str, outside: &Outside, started
         registries: None,
         scratch: directory.clone(),
     };
-    // A review that ran out of allowance starts over on the next model: it
-    // has no session to go on with, and nothing it did is kept
+    // A review that ran out of allowance starts over on the next model, in a
+    // session of its own. One whose login went stale goes on in the same
+    // session: a long review is too much to throw away with the hand's work.
     let outcome = claude::on_each_model(&outside.models.reviewers, |model, _| {
-        let mut command = sandbox.claude(&claude::binary()?);
-        command.args(["--dangerously-skip-permissions", "--strict-mcp-config", "--tools", sandbox.tools()]);
-        command.args(["--model", model]);
-        command.args(["--append-system-prompt", &hand::what_it_can_reach(hand.services(), false)]);
-        claude::reply_of(&mut command, &prompt(brief, report), outside.time_limit, Some(started))
+        let session = claude::random_session_id()?;
+        let command = |continuing: bool| -> Result<std::process::Command> {
+            let mut command = sandbox.claude(&claude::binary()?);
+            command.args(["--dangerously-skip-permissions", "--strict-mcp-config", "--tools", sandbox.tools()]);
+            command.args(["--model", model]);
+            command.args(["--append-system-prompt", &hand::what_it_can_reach(hand.services(), false)]);
+            if continuing {
+                command.args(["--resume", &session]);
+            } else {
+                command.args(["--session-id", &session]);
+            }
+            Ok(command)
+        };
+        let refresh = || {
+            logs::event("review.login_refreshed", json!({ "hand": hand_id }));
+            claude::refresh_hand_login(&directory.join("profile"))
+        };
+        claude::again_if_the_login_went_stale(refresh, |again| {
+            if again {
+                claude::reply_of(&mut command(true)?, hand::CARRY_ON, outside.time_limit, Some(started))
+            } else {
+                claude::reply_of(&mut command(false)?, &prompt(brief, report), outside.time_limit, Some(started))
+            }
+        })
     });
     transcripts::keep(&directory.join("profile"), hand_id, true);
     let _ = fs::remove_dir_all(&directory);

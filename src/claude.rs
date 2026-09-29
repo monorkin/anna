@@ -197,6 +197,19 @@ pub fn says_the_login_went_stale(error: &anyhow::Error) -> bool {
     error.contains("access token has been revoked") || error.contains("access token has expired")
 }
 
+/// A hand's or a reviewer's run, and once more after `refresh` when the
+/// login it ran on went stale part way. The run is told whether this is that
+/// second go, so it can resume its session instead of starting over.
+pub fn again_if_the_login_went_stale<T>(refresh: impl FnOnce() -> Result<()>, mut run: impl FnMut(bool) -> Result<T>) -> Result<T> {
+    match run(false) {
+        Err(error) if says_the_login_went_stale(&error) => {
+            refresh()?;
+            run(true)
+        }
+        outcome => outcome,
+    }
+}
+
 /// A session id Claude Code will take, made here so a session can be
 /// resumed even when its first run never answered.
 pub fn random_session_id() -> Result<String> {
@@ -504,6 +517,36 @@ mod tests {
         let id = random_session_id().unwrap();
         assert_eq!(id.len(), 36);
         assert_eq!(&id[14..15], "4");
+    }
+
+    #[test]
+    fn a_run_whose_login_went_stale_goes_again_once_on_a_fresh_one() {
+        let refreshed = std::cell::RefCell::new(0);
+        let goes = std::cell::RefCell::new(Vec::new());
+        let stale = || anyhow::anyhow!("claude reported an error: Failed to authenticate. API Error: 401 OAuth access token has been revoked.");
+
+        let outcome = again_if_the_login_went_stale(
+            || {
+                *refreshed.borrow_mut() += 1;
+                Ok(())
+            },
+            |again| {
+                goes.borrow_mut().push(again);
+                if again {
+                    Ok("verdict")
+                } else {
+                    Err(stale())
+                }
+            },
+        );
+        assert_eq!(outcome.unwrap(), "verdict");
+        assert_eq!((*refreshed.borrow(), goes.take()), (1, vec![false, true]));
+
+        let still_stale = again_if_the_login_went_stale(|| Ok(()), |_| -> Result<()> { Err(stale()) });
+        assert!(still_stale.is_err(), "a second stale login is a failure, not a loop");
+
+        let other = again_if_the_login_went_stale(|| panic!("nothing to refresh"), |_| -> Result<()> { bail!("claude exited with signal: 9") });
+        assert!(other.is_err());
     }
 
     #[test]

@@ -16,7 +16,7 @@ use std::path::Path;
 
 use crate::conversation::Origin;
 
-const MIGRATIONS: [&str; 6] = ["
+const MIGRATIONS: [&str; 7] = ["
     CREATE TABLE schedules (
         id INTEGER PRIMARY KEY,
         source TEXT NOT NULL,
@@ -70,6 +70,17 @@ const MIGRATIONS: [&str; 6] = ["
     ALTER TABLE mail ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0;
 ", "
     ALTER TABLE work ADD COLUMN about TEXT;
+", "
+    CREATE TABLE abouts (
+        about TEXT NOT NULL,
+        source TEXT NOT NULL,
+        conversation TEXT NOT NULL,
+        thread TEXT NOT NULL,
+        claimed TEXT NOT NULL,
+        PRIMARY KEY (about, source, conversation)
+    );
+    INSERT INTO abouts (about, source, conversation, thread, claimed)
+        SELECT about, source, conversation, thread, updated FROM work WHERE about IS NOT NULL;
 "];
 
 /// A turn that was asked for and not yet finished: what a stopped Anna
@@ -299,15 +310,30 @@ impl Store {
                  about = coalesce(excluded.about, work.about), status = 'open', updated = excluded.updated",
             params![origin.source, origin.conversation, thread, title, project, about, now],
         )?;
+        if let Some(about) = about {
+            self.connection.execute(
+                "INSERT INTO abouts (about, source, conversation, thread, claimed) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (about, source, conversation) DO UPDATE SET thread = excluded.thread, claimed = excluded.claimed",
+                params![about, origin.source, origin.conversation, thread, now],
+            )?;
+        }
         Ok(())
     }
 
-    /// The thread that has claimed work on a recording, by the id it named.
+    /// The thread to hear what is said on a recording, by the id it named
+    /// when it claimed work there: the one working on it now, or else the one
+    /// that worked on it last. A thread claims its next piece of work once
+    /// the last is done, and what is said on the old to-do is still for the
+    /// thread that knows it — not for a new one that can only pass it on.
     pub fn thread_working_on(&self, about: &str) -> Result<Option<(String, Origin)>> {
         Ok(self
             .connection
             .query_row(
-                "SELECT thread, source, conversation FROM work WHERE status = 'open' AND about = ?1 ORDER BY updated DESC LIMIT 1",
+                "SELECT abouts.thread, abouts.source, abouts.conversation FROM abouts
+                 LEFT JOIN work ON work.source = abouts.source AND work.conversation = abouts.conversation
+                 WHERE abouts.about = ?1
+                 ORDER BY coalesce(work.status = 'open' AND work.about = abouts.about, 0) DESC, abouts.claimed DESC
+                 LIMIT 1",
                 params![about],
                 |row| Ok((row.get(0)?, Origin { source: row.get(1)?, conversation: row.get(2)? })),
             )
@@ -522,6 +548,31 @@ mod tests {
         assert_eq!(store.threads_named("card-2").unwrap(), [("basecamp-card-2".to_string(), origin("card-2"))], "done work can still be found");
         assert_eq!(store.threads_named("card").unwrap().len(), 2);
         assert_eq!(store.threads_named("nobody").unwrap(), []);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn what_is_said_on_a_to_do_reaches_the_thread_that_worked_on_it_last() {
+        let (store, directory) = store("abouts");
+        store.claim_work(&origin("ping"), "basecamp-ping", "Folders over HTTP", None, Some("12345678901"), "t1").unwrap();
+        store.claim_work(&origin("ping"), "basecamp-ping", "Contacts over HTTP", None, Some("12345678902"), "t2").unwrap();
+        assert_eq!(
+            store.thread_working_on("12345678901").unwrap(),
+            Some(("basecamp-ping".to_string(), origin("ping"))),
+            "the folders to-do is still the ping thread's once it has moved on to contacts"
+        );
+
+        store.claim_work(&origin("card-2"), "basecamp-card-2", "Folders, the second half", None, Some("12345678901"), "t3").unwrap();
+        assert_eq!(store.thread_working_on("12345678901").unwrap().map(|(thread, _)| thread).as_deref(), Some("basecamp-card-2"), "whoever works on it now hears it");
+
+        store.claim_work(&origin("ping"), "basecamp-ping", "Folders again", None, Some("12345678901"), "t4").unwrap();
+        store.finish_work(&origin("ping"), "t5").unwrap();
+        assert_eq!(
+            store.thread_working_on("12345678901").unwrap().map(|(thread, _)| thread).as_deref(),
+            Some("basecamp-card-2"),
+            "open work comes before work that is done, however recent"
+        );
+        assert_eq!(store.thread_working_on("12345678902").unwrap().map(|(thread, _)| thread).as_deref(), Some("basecamp-ping"));
         std::fs::remove_dir_all(directory).unwrap();
     }
 

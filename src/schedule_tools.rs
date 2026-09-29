@@ -129,8 +129,20 @@ impl Tool for Schedule {
         let trusted = self.standing == Standing::Trusted;
         let id = store.add_schedule(&self.origin, cron, task, first_run, trusted, &clock::timestamp())?;
         logs::event("schedule.added", json!({ "schedule": id, "cron": cron, "first_run": shown(first_run) }));
-        Ok(format!("Scheduled as number {id}. It first runs {}.", shown(first_run)))
+        Ok(scheduled(id, first_run, now))
     }
+}
+
+/// Says how far off the first run is and what time it is here: a thread
+/// reads UTC everywhere else — git, GitHub, the log — and a time it meant in
+/// UTC is hours off in local time, which only the distance gives away.
+fn scheduled(id: i64, first_run: i64, now: DateTime<Local>) -> String {
+    format!(
+        "Scheduled as number {id}. It first runs {}, {} from now (local time; it is {} here now).",
+        shown(first_run),
+        ax::clock::span(first_run - now.timestamp()),
+        now.format("%H:%M")
+    )
 }
 
 pub struct ListSchedules {
@@ -231,6 +243,15 @@ mod tests {
 
         assert!(refuse_if_too_often("0,5,6 * * * *", at("2026-09-21 07:59")).is_err(), "the first gap is five minutes, the second is one");
         assert!(refuse_if_too_often("0,59 0,23 1,2 * *", now).is_err(), "23:59 on the 1st and 00:00 on the 2nd");
+    }
+
+    #[test]
+    fn a_new_schedule_says_how_far_off_it_is_and_the_local_time() {
+        let now = at("2026-09-27 18:43");
+        assert_eq!(
+            scheduled(2, at("2026-09-27 20:00").timestamp(), now),
+            "Scheduled as number 2. It first runs Sun 2026-09-27 20:00, 1h 17m from now (local time; it is 18:43 here now)."
+        );
     }
 
     #[test]

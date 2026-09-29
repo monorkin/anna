@@ -22,7 +22,7 @@ use crate::proxy::{self, Proxy};
 use crate::sandbox::{self, Outside, Sandbox, Service};
 use crate::transcripts;
 
-const CARRY_ON: &str = "Your run was cut off part way — the login it ran on was refreshed underneath it — and you have just been started again in the same session. Nothing you did is lost. Look at where things stand and carry on from there; when you are done, report as you would have.";
+pub const CARRY_ON: &str = "Your run was cut off part way — the login it ran on was refreshed underneath it — and you have just been started again in the same session. Nothing you did is lost. Look at where things stand and carry on from there; when you are done, report as you would have.";
 const ON_ANOTHER_MODEL: &str = "Your run was cut off part way — the Claude allowance for the model it ran on is used up — and you have just been started again in the same session on another model. Nothing you did is lost. The limit message in your history is about that, not about anything in the project. Look at where things stand and carry on with the brief from there; when you are done, report as you would have.";
 
 pub struct Hand {
@@ -151,20 +151,22 @@ impl Hand {
     }
 
     fn run(&mut self, model: &str, told: &str, outside: &Outside, started: &Started) -> Result<Reply> {
-        let mut command = self.command(model, outside)?;
-        let reply = claude::reply_of(&mut command, told, outside.time_limit, Some(started));
+        let (id, profile) = (self.id.clone(), self.directory.join("profile"));
         // Her login was refreshed while the hand ran and the token it held
         // was revoked with that, or the token simply expired. The session is
         // whole: it goes on with her current token and what it had done.
-        if reply.as_ref().is_err_and(claude::says_the_login_went_stale) {
-            logs::event("hand.login_refreshed", json!({ "hand": self.id }));
-            self.begun = true;
-            claude::refresh_hand_login(&self.directory.join("profile"))?;
-            let mut again = self.command(model, outside)?;
-            claude::reply_of(&mut again, CARRY_ON, outside.time_limit, Some(started))
-        } else {
-            reply
-        }
+        let refresh = || {
+            logs::event("hand.login_refreshed", json!({ "hand": id }));
+            claude::refresh_hand_login(&profile)
+        };
+        claude::again_if_the_login_went_stale(refresh, |again| {
+            if again {
+                self.begun = true;
+                claude::reply_of(&mut self.command(model, outside)?, CARRY_ON, outside.time_limit, Some(started))
+            } else {
+                claude::reply_of(&mut self.command(model, outside)?, told, outside.time_limit, Some(started))
+            }
+        })
     }
 
     fn command(&self, model: &str, outside: &Outside) -> Result<Command> {
