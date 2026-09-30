@@ -8,17 +8,15 @@
 use anyhow::{Context, Result, bail};
 use serde_json::json;
 use std::fs;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::process::Command;
 
 use crate::broker::{self, Endpoint, Tool};
 use crate::claude::{self, Reply, Started};
 use crate::clock;
 use crate::logs;
 use crate::paths;
-use crate::proxy::{self, Proxy};
+use crate::proxy::{self, Bridge, Proxy};
 use crate::sandbox::{self, Outside, Sandbox, Service};
 use crate::transcripts;
 
@@ -36,7 +34,9 @@ pub struct Hand {
     begun: bool,
     granted: Option<Endpoint>,
     services: Vec<Service>,
-    bridges: Vec<Child>,
+    /// Gone with the hand, and the sockets its services are reached through
+    /// with them.
+    _bridges: Vec<Bridge>,
     /// A proxy of its own when it may fetch from the package registries;
     /// otherwise it shares the one that reaches Claude and nothing else.
     registries: Option<Proxy>,
@@ -91,7 +91,7 @@ impl Hand {
             begun: false,
             granted,
             services,
-            bridges,
+            _bridges: bridges,
             registries,
             asked: Vec::new(),
             rejections: 0,
@@ -197,51 +197,22 @@ impl Hand {
         Ok(command)
     }
 
-    pub fn discard(mut self) {
-        for bridge in &mut self.bridges {
-            let _ = bridge.kill();
-            let _ = bridge.wait();
-        }
-        for service in &self.services {
-            let _ = fs::remove_file(&service.socket);
-        }
+    pub fn discard(self) {
         transcripts::keep(&self.directory.join("profile"), &self.id, false);
         let _ = fs::remove_dir_all(&self.directory);
         logs::event("hand.discarded", json!({ "hand": self.id }));
     }
 }
 
-/// One socat on the host per port, listening on a socket of the hand's and
-/// connecting to the port on loopback. It dies with Anna, and is killed
-/// with the hand.
-fn bridge(hand: &str, ports: &[u16]) -> Result<(Vec<Service>, Vec<Child>)> {
+/// One bridge per port, listening on a socket of the hand's and connecting
+/// to the port on loopback. They go with the hand.
+fn bridge(hand: &str, ports: &[u16]) -> Result<(Vec<Service>, Vec<Bridge>)> {
     let mut services = Vec::new();
     let mut bridges = Vec::new();
     for (n, port) in ports.iter().enumerate() {
         let socket = paths::socket(&format!("service-{hand}-{n}"));
-        let _ = fs::remove_file(&socket);
-        let mut command = Command::new("socat");
-        command
-            .arg(format!("UNIX-LISTEN:{},fork,mode=600", socket.display()))
-            .arg(format!("TCP:127.0.0.1:{port}"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        unsafe {
-            command.pre_exec(|| {
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-                Ok(())
-            });
-        }
-        bridges.push(command.spawn().with_context(|| format!("could not bridge port {port} into the sandbox"))?);
+        bridges.push(Bridge::start(&socket, *port).with_context(|| format!("could not bridge port {port} into the sandbox"))?);
         services.push(Service { port: *port, socket });
-    }
-    // socat binds its socket after starting; the sandbox binds the file in
-    for service in &services {
-        let began = std::time::Instant::now();
-        while !service.socket.exists() && began.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
     }
     Ok((services, bridges))
 }

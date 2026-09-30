@@ -1,13 +1,14 @@
-//! The only way out of a hand's sandbox: an HTTP CONNECT proxy on a unix
-//! socket that tunnels to an allowlist of hosts and refuses everything else.
-//! The sandbox has no network of its own, so what isn't allowed here doesn't
+//! The only ways out of a hand's sandbox: an HTTP CONNECT proxy on a unix
+//! socket that tunnels to an allowlist of hosts and refuses everything else,
+//! and bridges to the ports on this machine's loopback it was granted. The
+//! sandbox has no network of its own, so what isn't allowed here doesn't
 //! exist for the hand. Refusals are logged — they're the record of what a
 //! hand tried to reach.
 
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -75,6 +76,40 @@ impl Drop for Proxy {
     }
 }
 
+/// One port on this machine's loopback, reached through a unix socket the
+/// sandbox binds in. It runs inside Anna rather than as a socat of its own:
+/// a child told to die with its parent dies with the thread that started
+/// it, and start_hand's thread is gone the moment it answers — taking every
+/// hand's database with it before the hand had begun.
+pub struct Bridge {
+    socket: PathBuf,
+}
+
+impl Bridge {
+    pub fn start(socket: &Path, port: u16) -> Result<Bridge> {
+        let _ = fs::remove_file(socket);
+        let listener = UnixListener::bind(socket).with_context(|| format!("could not listen on {}", socket.display()))?;
+
+        thread::spawn(move || {
+            for client in listener.incoming().flatten() {
+                thread::spawn(move || {
+                    let _ = TcpStream::connect(("127.0.0.1", port)).and_then(|upstream| splice(client.try_clone()?, client, upstream));
+                });
+            }
+        });
+
+        Ok(Bridge {
+            socket: socket.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.socket);
+    }
+}
+
 fn serve(client: UnixStream, allowed: &[String]) -> Result<()> {
     let mut reader = BufReader::new(client.try_clone()?);
     let target = connect_target(&mut reader)?;
@@ -108,10 +143,14 @@ fn connect_target(reader: &mut BufReader<UnixStream>) -> Result<String> {
     }
 }
 
-fn tunnel(mut client: UnixStream, mut from_client: BufReader<UnixStream>, target: &str) -> Result<()> {
+fn tunnel(mut client: UnixStream, from_client: BufReader<UnixStream>, target: &str) -> Result<()> {
     let upstream = TcpStream::connect(target).with_context(|| format!("could not reach {target}"))?;
     client.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")?;
+    Ok(splice(from_client, client, upstream)?)
+}
 
+/// Both ways at once, until each side is done sending.
+fn splice(mut from_client: impl Read + Send + 'static, mut client: UnixStream, upstream: TcpStream) -> io::Result<()> {
     let mut to_upstream = upstream.try_clone()?;
     let outbound = thread::spawn(move || {
         let _ = io::copy(&mut from_client, &mut to_upstream);
@@ -171,5 +210,34 @@ mod tests {
         let mut response = String::new();
         plain.read_to_string(&mut response).unwrap();
         assert_eq!(response, "HTTP/1.1 403 Forbidden\r\n\r\n");
+    }
+
+    #[test]
+    fn a_bridge_outlives_the_thread_that_started_it_and_goes_with_its_owner() {
+        let database = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = database.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let (mut connection, _) = database.accept().unwrap();
+            let mut asked = [0; 8];
+            connection.read_exact(&mut asked).unwrap();
+            connection.write_all(b"1 row").unwrap();
+        });
+
+        let socket = socket_path("bridge");
+        let bridge = thread::spawn({
+            let socket = socket.clone();
+            move || Bridge::start(&socket, port).unwrap()
+        })
+        .join()
+        .unwrap();
+
+        let mut client = UnixStream::connect(&socket).unwrap();
+        client.write_all(b"SELECT 1").unwrap();
+        let mut answer = [0; 5];
+        client.read_exact(&mut answer).unwrap();
+        assert_eq!(&answer, b"1 row");
+
+        drop(bridge);
+        assert!(!socket.exists(), "the socket goes with the bridge");
     }
 }
