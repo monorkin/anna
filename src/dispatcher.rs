@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread as os_thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::at_work;
 use crate::claude::{self, OutOfQuota};
@@ -44,6 +44,7 @@ const SWITCH_AT_PERCENT: f64 = 90.0;
 const SECONDS_BETWEEN_ACCOUNT_CHECKS: u64 = 600;
 const SECONDS_BETWEEN_TRIES_FOR_QUOTA: u64 = 600;
 const MOST_WAITS_FOR_QUOTA: u32 = 120;
+const SECONDS_A_SWITCH_ANSWERS_FOR: u64 = 300;
 
 pub fn run() -> Result<()> {
     let _only_one = control::be_the_only_one()?;
@@ -566,10 +567,45 @@ fn wake_once_there_is_quota(runtime: &Arc<Runtime>, conversation: &Arc<dyn Conve
             Err(error) if error.downcast_ref::<OutOfQuota>().is_some() && waits < MOST_WAITS_FOR_QUOTA => {
                 waits += 1;
                 logs::event("thread.waiting_for_quota", json!({ "conversation": conversation.key(), "waits": waits, "said": format!("{error:#}") }));
-                os_thread::sleep(Duration::from_secs(SECONDS_BETWEEN_TRIES_FOR_QUOTA));
+                if !(runtime.config.rotate_accounts && moved_off_the_spent_account()) {
+                    os_thread::sleep(Duration::from_secs(SECONDS_BETWEEN_TRIES_FOR_QUOTA));
+                }
             }
             outcome => return outcome,
         }
+    }
+}
+
+/// Claude refusing a turn for the limit is the surest reading there is.
+/// Rotation goes by the usage endpoint, whose kept reading said 86% of an
+/// account Claude had already stopped, and every thread sat waiting hours
+/// for a reset with another account barely touched. So a refusal moves her
+/// to the stored account with the most room, when one has any. Threads hit
+/// the limit together: one switch answers all of them for a while, or the
+/// next would switch back to the spent account on its stale reading.
+fn moved_off_the_spent_account() -> bool {
+    static LAST_SWITCH: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut last = LAST_SWITCH.lock().unwrap();
+    if last.is_some_and(|it| it.elapsed() < Duration::from_secs(SECONDS_A_SWITCH_ANSWERS_FOR)) {
+        return true;
+    }
+
+    let Ok(reports) = ax::usage::of_every_account() else {
+        return false;
+    };
+    let roomiest = reports
+        .iter()
+        .filter(|it| !it.active)
+        .filter_map(|it| Some((it, it.reading.as_ref()?.usage.utilization()?)))
+        .filter(|(_, used)| *used < SWITCH_AT_PERCENT)
+        .min_by(|(_, one), (_, other)| one.total_cmp(other));
+    match roomiest {
+        Some((report, used)) if ax::account::switch(&report.account.email).is_ok() => {
+            logs::event("accounts.switched_at_the_limit", json!({ "to": report.account.email, "used": used }));
+            *last = Some(Instant::now());
+            true
+        }
+        _ => false,
     }
 }
 
