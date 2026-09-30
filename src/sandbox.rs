@@ -89,9 +89,13 @@ pub struct Outside {
 /// flat 8G was too little: cargo builds with one rustc per core, and on 32
 /// cores a test build went past it and the kernel killed the reviewer
 /// mid-review. Past the first share a session is slowed down, past the
-/// second it is stopped.
+/// second it is stopped. It may swap as much again: without swap, one slowed
+/// down past its share has nowhere to put what it needs, the pressure that
+/// builds has systemd-oomd kill it long before its ceiling, and a fat-LTO
+/// link of shop was killed that way twice at under 12G of 29.
 const SLOWED_PAST: &str = "MemoryHigh=40%";
 const MOST_MEMORY: &str = "MemoryMax=50%";
+const MOST_SWAP: &str = "MemorySwapMax=50%";
 const MOST_PROCESSES: &str = "TasksMax=2048";
 const SECONDS_TO_FIND_OUT: u64 = 10;
 
@@ -139,7 +143,7 @@ fn scope() -> Command {
     let mut command = Command::new("systemd-run");
     command
         .args(["--user", "--scope", "--quiet", "--collect"])
-        .args(["-p", SLOWED_PAST, "-p", MOST_MEMORY, "-p", "MemorySwapMax=0", "-p", MOST_PROCESSES])
+        .args(["-p", SLOWED_PAST, "-p", MOST_MEMORY, "-p", MOST_SWAP, "-p", MOST_PROCESSES])
         .arg("--");
     command
 }
@@ -722,6 +726,7 @@ mod tests {
         let bwrap = arguments.iter().position(|it| it == "bwrap").expect("with a scope to be had, bwrap runs inside one");
         assert!(arguments[..bwrap].contains(&"--scope".to_string()));
         assert!(arguments[..bwrap].iter().any(|it| it.starts_with("MemoryMax=")));
+        assert!(arguments[..bwrap].contains(&"MemorySwapMax=50%".to_string()), "a session may swap rather than be killed under pressure");
         assert!(arguments[..bwrap].iter().any(|it| it.starts_with("TasksMax=")));
 
         assert_eq!(binds(&arguments, "--bind"), [("/data/hands/h1/tmp", "/tmp"), ("/data/hands/h1/home", "/home/hand"), ("/data/reviews/r1/profile", "/profile"), ("/data/builds/abc", BUILD_INSIDE)]);
