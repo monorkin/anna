@@ -3,23 +3,21 @@
 //! A count of busy conversations says she is doing something but not what,
 //! and the things worth knowing are spread out: the board holds what a
 //! thread claimed, the dispatcher holds what is queued behind a turn, and
-//! only the turn itself knows it started a hand and when. None of that
-//! survives the turn, so it is written down here while it happens and read
-//! back whole by `anna status`.
+//! only the turn and its hands know when they started. None of that is kept
+//! anywhere, so it is written down here while it happens and read back
+//! whole by `anna status`.
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct AtWork {
-    turns: Mutex<HashMap<String, Turn>>,
-}
-
-pub struct Turn {
-    pub began: Instant,
-    pub hands: Vec<Hand>,
+    turns: Mutex<HashMap<String, Instant>>,
+    /// By conversation. A hand works on after the turn that started it is
+    /// over, so its thread can listen meanwhile.
+    hands: Mutex<HashMap<String, Vec<Hand>>>,
 }
 
 pub struct Hand {
@@ -28,9 +26,11 @@ pub struct Hand {
     pub began: Instant,
 }
 
+/// A conversation with a turn running, hands working, or both. Its turn's
+/// time is none between turns.
 pub struct Going {
     pub conversation: String,
-    pub taken: Duration,
+    pub taken: Option<Duration>,
     pub hands: Vec<HandAt>,
 }
 
@@ -49,37 +49,42 @@ pub struct WhileItRuns {
 
 impl AtWork {
     pub fn turn_began(self: &Arc<AtWork>, conversation: &str) -> WhileItRuns {
-        self.turns
-            .lock()
-            .unwrap()
-            .insert(conversation.to_string(), Turn { began: Instant::now(), hands: Vec::new() });
+        self.turns.lock().unwrap().insert(conversation.to_string(), Instant::now());
         WhileItRuns { at_work: self.clone(), conversation: conversation.to_string() }
     }
 
     pub fn hand_began(&self, conversation: &str, id: &str, project: &str) {
-        if let Some(turn) = self.turns.lock().unwrap().get_mut(conversation) {
-            turn.hands.push(Hand { id: id.to_string(), project: project.to_string(), began: Instant::now() });
-        }
+        let hand = Hand { id: id.to_string(), project: project.to_string(), began: Instant::now() };
+        self.hands.lock().unwrap().entry(conversation.to_string()).or_default().push(hand);
     }
 
     pub fn hand_ended(&self, conversation: &str, id: &str) {
-        if let Some(turn) = self.turns.lock().unwrap().get_mut(conversation) {
-            turn.hands.retain(|hand| hand.id != id);
+        let mut hands = self.hands.lock().unwrap();
+        if let Some(working) = hands.get_mut(conversation) {
+            working.retain(|hand| hand.id != id);
+            if working.is_empty() {
+                hands.remove(conversation);
+            }
         }
     }
 
-    /// Every turn going, longest first, with the clock already read so the
-    /// caller doesn't hold the lock to do it.
+    /// Every conversation with something going, the longest-running turn
+    /// first and those between turns last, with the clock already read so
+    /// the caller doesn't hold the locks to do it.
     pub fn going_on(&self) -> Vec<Going> {
         let now = Instant::now();
         let turns = self.turns.lock().unwrap();
-        let mut going: Vec<Going> = turns
-            .iter()
-            .map(|(conversation, turn)| Going {
+        let hands = self.hands.lock().unwrap();
+        let conversations: BTreeSet<&String> = turns.keys().chain(hands.keys()).collect();
+        let mut going: Vec<Going> = conversations
+            .into_iter()
+            .map(|conversation| Going {
                 conversation: conversation.clone(),
-                taken: now - turn.began,
-                hands: turn
-                    .hands
+                taken: turns.get(conversation).map(|began| now - *began),
+                hands: hands
+                    .get(conversation)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
                     .iter()
                     .map(|hand| HandAt {
                         hand: hand.id.clone(),
@@ -118,7 +123,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_turn_and_its_hands_are_there_while_they_run_and_gone_after() {
+    fn turns_and_hands_are_there_while_they_run_and_gone_after() {
         let at_work = Arc::new(AtWork::default());
         assert!(at_work.going_on().is_empty());
 
@@ -130,14 +135,17 @@ mod tests {
         let going = at_work.going_on();
         assert_eq!(going.len(), 1);
         assert_eq!(going[0].conversation, "basecamp-one");
+        assert!(going[0].taken.is_some());
         assert_eq!(going[0].hands.len(), 1, "the hand that ended is gone, the other one is still there");
         assert_eq!(going[0].hands[0].project, "/home/x/blog");
 
-        at_work.hand_began("basecamp-two", "h3", "/home/x/anna");
-        assert_eq!(at_work.going_on().len(), 1, "a hand of a turn nobody is running is not kept");
-
         drop(running);
-        assert!(at_work.going_on().is_empty(), "the turn takes its hands with it however it ended");
+        let going = at_work.going_on();
+        assert_eq!(going.len(), 1, "the hand works on after its turn is over");
+        assert_eq!((going[0].taken, going[0].hands[0].hand.as_str()), (None, "h2"));
+
+        at_work.hand_ended("basecamp-one", "h2");
+        assert!(at_work.going_on().is_empty());
     }
 
     #[test]

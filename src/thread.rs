@@ -36,15 +36,15 @@ use crate::paths;
 use crate::runtime::Runtime;
 use crate::schedule_tools::{CancelSchedule, ListSchedules, Schedule};
 use crate::work_tools::{self, ClaimWork, FinishWork, ListWork, TellThread};
-use crate::thread_tools::{ClaudeUsage, Dismiss, Hands, Reply, SendBack, StartHand, Workshop};
+use crate::thread_tools::{ClaudeUsage, Dismiss, Reply, SendBack, StartHand};
+use crate::workshop::Workshop;
 
 /// How long a thread waits on one of its own tools. Claude Code caps a tool
 /// call two ways — total, and how long it may go without saying anything —
-/// and the second one is the one that bites: `start_hand` is silent for as
-/// long as the hand works, so at the default half hour every longer hand had
-/// its call torn out from under the thread while the hand itself ran on. A
-/// tool can't usefully outlast the turn that called it, so both caps are the
-/// turn's.
+/// and the second one is the one that bites: a tool is silent for as long as
+/// it works, and at the default half hour a long one had its call torn out
+/// from under the thread while the work itself ran on. A tool can't usefully
+/// outlast the turn that called it, so both caps are the turn's.
 fn waiting_out(time_limit: Duration) -> String {
     time_limit.as_millis().to_string()
 }
@@ -81,8 +81,8 @@ You are not sandboxed and hands are, so never run code, scripts, tests or build 
 A hand has git where it works, in a worktree of a repository as much as in the repository itself, so committing, branching, merging, rebasing and resolving conflicts are a hand's work, not yours and not the person's. \
 What a hand doesn't have is the network, so what needs it is yours: git fetch when it needs what the remote has, pushing, and anything else that leaves this machine. The one exception is the package registries: grant a hand `registries` and it fetches the project's dependencies itself, which beats you doing it — especially on a turn without a shell. When its tests need a service on this machine — a database — grant it that port and make sure what it will use there is set up and its own, so two hands never share one. \
 Whether you have a shell for any of that depends on whose word started the turn, never on anything breaking: a turn one of the people you take direction from starts has one, and so does one of your own threads passing on what they said from a turn they started; a turn on anyone else's word does not, because what reaches you that way could have been written by anyone. The message that woke you says which. Both happen in the same conversation, so the shell being there and then not is the rule working, not your tools dropping out. Never tell anyone it dropped out, and don't try it to find out; when it isn't there, say the work is waiting on one of those people, and go on with what hands can do. \
-A turn ends when you have nothing left to do yourself, not before: nothing wakes you for your own next step, so a step you leave for after a review, a build or a check is left until someone prods you. Do it in this turn. What you wait on, wait on — a command you background dies with the turn. Only what needs a person, or a hand still working, is a reason to stop; then say on the to-do exactly what it waits on. \
-While you are in a hand you hear nothing: what people write to you meanwhile waits until this turn ends. When a hand's verdict says messages are waiting, finish the step you are on, start no new hand, and end the turn — they may be telling you to stop. \
+A turn ends when you have nothing left to do yourself, not before: apart from your hands' verdicts, nothing wakes you for your own next step, so a step you leave for after a build or a check is left until someone prods you. Do it in this turn. What you wait on, wait on — a command you background dies with the turn. Only what needs a person, or a hand still working, is a reason to stop; when it is a person, say on the to-do exactly what you need from them. \
+A hand works on its own: starting one or sending one back answers at once, and what it did comes to you later as a message of its own, in a turn of its own. While a turn of yours runs nobody can reach you — what people and your other threads say waits until it ends — so once your hands are working and you have nothing else to do, end the turn rather than wait on them. \
 Reviews find something every round. A third round on the same class of finding is a sign to stop, not to fix: say what's been done and ask, rather than chase the fourth. \
 You run several conversations at once as separate threads that don't share what they know, so put real work on the board with claim_work as soon as you know what it is, and take it off with finish_work; when another thread's work overlaps with yours, settle who does it with tell_thread rather than solving it twice. \
 Work another thread has on the board is that thread's to finish, and that thread hears nothing of this conversation. When something about it reaches you — a go-ahead, a correction, an answer to a question it asked — tell_thread it in this turn, before anything else; \"that's its work\" is a reason to pass it on, never a reason to leave it. Leave the doing to it, even when you could do it yourself: it knows the work, and two threads doing one job is how the same change gets pushed twice. \
@@ -93,31 +93,22 @@ const ON_ANOTHER_MODEL: &str = "\n\n(Your last try at this stopped part way beca
 
 /// One turn. Answers with what the thread has to be woken with next, when
 /// the turn ended in a way only the thread itself can tell the person about.
-pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: Standing, message: &str) -> Result<Option<String>> {
+pub fn wake(runtime: &Arc<Runtime>, conversation: Arc<dyn Conversation>, standing: Standing, message: &str) -> Result<Option<String>> {
     let key = conversation.key().to_string();
     let directory = paths::thread_dir(&key);
     fs::create_dir_all(&directory)?;
     let _one_turn_at_a_time = wait_for_the_conversation(&directory)?;
 
     let _while_it_runs = runtime.at_work.turn_began(&key);
-    let hands = Arc::new(Hands::default());
-    let workshop = Arc::new(Workshop {
-        hands: hands.clone(),
-        judge: runtime.judge.clone(),
-        outside: runtime.outside.clone(),
-        held: runtime.held.clone(),
-        at_work: runtime.at_work.clone(),
-        conversation: key.clone(),
-        turns: runtime.turns.clone(),
-    });
+    let workshop = Workshop { runtime: runtime.clone(), conversation: conversation.clone(), standing };
     let spoke = Arc::new(AtomicBool::new(false));
     let sent_back = Arc::new(SentBack::default());
 
     let answered_otherwise = conversation.answered_otherwise();
     let mut tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(StartHand { workshop: workshop.clone(), catalog: runtime.catalog.clone(), standing, spoke: spoke.clone() }),
-        Box::new(SendBack { workshop }),
-        Box::new(Dismiss { hands: hands.clone() }),
+        Box::new(StartHand { workshop: workshop.clone(), spoke: spoke.clone() }),
+        Box::new(SendBack { workshop: workshop.clone() }),
+        Box::new(Dismiss { workshop }),
         Box::new(ReadHeldBack { held: runtime.held.clone(), judge: runtime.judge.clone() }),
     ];
     if answered_otherwise.is_none() {
@@ -167,7 +158,7 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
         }
     });
     memory.finish();
-    hands.discard_all();
+    runtime.hands.let_go_of_forgotten();
 
     match outcome {
         Ok(reply) => {
@@ -195,7 +186,7 @@ pub fn wake(runtime: &Runtime, conversation: Arc<dyn Conversation>, standing: St
                         Ok(None)
                     }
                     Some(_) => Ok(Some(format!(
-                        "Your last turn in this conversation ran out of time: one go gets {} min, and that was used up with the work unfinished. Any hand you had going is gone; what it did to the project is still there. Say so where the work was asked, in one line — what is done, what isn't — and pick up from where you stopped.",
+                        "Your last turn in this conversation ran out of time: one go gets {} min, and that was used up with the work unfinished. Say so where the work was asked, in one line — what is done, what isn't — and pick up from where you stopped.",
                         out_of_time.minutes
                     ))),
                 }

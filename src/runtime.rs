@@ -27,6 +27,7 @@ use crate::store::Store;
 use crate::toolchains::Toolchains;
 use crate::turns::Turns;
 use crate::held::HeldBack;
+use crate::workshop::Hands;
 
 pub struct Runtime {
     pub config: Config,
@@ -45,9 +46,10 @@ pub struct Runtime {
     /// What is going on this minute, which nothing else keeps: the board
     /// outlives a turn and the log is already past.
     pub at_work: Arc<AtWork>,
-    /// Every conversation's queue of turns. A thread in a hand can't hear
-    /// what is queued behind it, but its tools can say so.
+    /// Every conversation's queue of turns.
     pub turns: Arc<Turns>,
+    /// Every thread's hands, which work on between their thread's turns.
+    pub hands: Arc<Hands>,
     _proxy: Proxy,
 }
 
@@ -92,8 +94,17 @@ impl Runtime {
             outside,
             at_work: Arc::new(AtWork::default()),
             turns: Arc::new(Turns::default()),
+            hands: Arc::new(Hands::default()),
             _proxy: proxy,
         })
+    }
+
+    /// For a process that runs one conversation and exits, like `anna
+    /// chat`: its hands and the turns their verdicts wake would die with it.
+    pub fn wait_until_settled(&self) {
+        while self.hands.are_working() || self.turns.busy_conversations() > 0 {
+            std::thread::sleep(Duration::from_secs(1));
+        }
     }
 }
 

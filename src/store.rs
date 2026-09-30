@@ -16,7 +16,7 @@ use std::path::Path;
 
 use crate::conversation::Origin;
 
-const MIGRATIONS: [&str; 7] = ["
+const MIGRATIONS: [&str; 8] = ["
     CREATE TABLE schedules (
         id INTEGER PRIMARY KEY,
         source TEXT NOT NULL,
@@ -81,6 +81,15 @@ const MIGRATIONS: [&str; 7] = ["
     );
     INSERT INTO abouts (about, source, conversation, thread, claimed)
         SELECT about, source, conversation, thread, updated FROM work WHERE about IS NOT NULL;
+", "
+    CREATE TABLE hands (
+        hand TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        conversation TEXT NOT NULL,
+        trusted INTEGER NOT NULL,
+        project TEXT NOT NULL,
+        started TEXT NOT NULL
+    );
 "];
 
 /// A turn that was asked for and not yet finished: what a stopped Anna
@@ -91,6 +100,16 @@ pub struct PendingTurn {
     pub origin: Origin,
     pub trusted: bool,
     pub said: String,
+}
+
+/// A hand that was working when she was stopped. It is gone with her, and
+/// no turn of its thread is waiting to hear so, so its thread is told.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandLeft {
+    pub hand: String,
+    pub origin: Origin,
+    pub trusted: bool,
+    pub project: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -274,6 +293,34 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(turns)
+    }
+
+    pub fn hand_at_work(&self, hand: &str, origin: &Origin, trusted: bool, project: &str, now: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR REPLACE INTO hands (hand, source, conversation, trusted, project, started) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![hand, origin.source, origin.conversation, trusted, project, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn hand_done(&self, hand: &str) -> Result<()> {
+        self.connection.execute("DELETE FROM hands WHERE hand = ?1", params![hand])?;
+        Ok(())
+    }
+
+    pub fn hands_left(&self) -> Result<Vec<HandLeft>> {
+        let mut statement = self.connection.prepare("SELECT hand, source, conversation, trusted, project FROM hands ORDER BY started")?;
+        let hands = statement
+            .query_map([], |row| {
+                Ok(HandLeft {
+                    hand: row.get(0)?,
+                    origin: Origin { source: row.get(1)?, conversation: row.get(2)? },
+                    trusted: row.get(3)?,
+                    project: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(hands)
     }
 
     /// A conversation is opened the first time a trusted person speaks in
@@ -483,6 +530,22 @@ mod tests {
         assert_eq!(store.turns_left().unwrap().iter().map(|it| it.id).collect::<Vec<_>>(), [second]);
         store.forget_turn(second).unwrap();
         assert!(store.turns_left().unwrap().is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn hands_at_work_are_kept_until_they_are_done() {
+        let (store, directory) = store("hands");
+        store.hand_at_work("h1", &origin("card-1"), true, "/srv/shop", "2026-09-30T09:00:00Z").unwrap();
+        store.hand_at_work("h2", &origin("card-2"), false, "/srv/blog", "2026-09-30T09:00:01Z").unwrap();
+        store.hand_done("h1").unwrap();
+
+        assert_eq!(
+            store.hands_left().unwrap(),
+            [HandLeft { hand: "h2".to_string(), origin: origin("card-2"), trusted: false, project: "/srv/blog".to_string() }]
+        );
+        store.hand_done("h2").unwrap();
+        assert!(store.hands_left().unwrap().is_empty());
         std::fs::remove_dir_all(directory).unwrap();
     }
 

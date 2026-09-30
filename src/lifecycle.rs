@@ -166,7 +166,10 @@ fn print_going_on(turns: &[serde_json::Value]) {
 
     println!("\nGoing on right now:");
     for turn in turns {
-        println!("  {} for {}{}", text(&turn["conversation"]), text(&turn["for"]), behind(&turn["waiting"]));
+        match turn["for"].as_str() {
+            Some(taken) => println!("  {} for {taken}{}", text(&turn["conversation"]), behind(&turn["waiting"])),
+            None => println!("  {}, between turns", text(&turn["conversation"])),
+        }
         if let Some(doing) = turn["doing"].as_str() {
             println!("      {doing}");
         }

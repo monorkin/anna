@@ -36,6 +36,7 @@ use crate::thread;
 use crate::timekeeper;
 use crate::triggers;
 use crate::turns::Turns;
+use crate::workshop;
 
 const SWITCH_AT_PERCENT: f64 = 90.0;
 /// ax answers from its last reading when the endpoint was asked in the past
@@ -76,6 +77,9 @@ pub fn run() -> Result<()> {
     if let Err(error) = pick_up_where_she_left_off(&runtime, &turns) {
         logs::event("turns.not_resumed", json!({ "error": format!("{error:#}") }));
     }
+    if let Err(error) = workshop::tell_of_hands_a_restart_stopped(&runtime) {
+        logs::event("hands.not_told", json!({ "error": format!("{error:#}") }));
+    }
     logs::event("anna.listening", json!({ "sources": runtime.config.sources.keys().collect::<Vec<_>>() }));
     loop {
         os_thread::park();
@@ -91,8 +95,9 @@ struct Running {
 }
 
 impl Running {
-    /// Every turn in flight: what that thread claimed, how long it has been
-    /// at it, how much is queued behind it, and what its hands are doing.
+    /// Every turn in flight, and every thread with hands working between
+    /// turns: what it claimed, how long its turn has been at it, how much is
+    /// queued behind it, and what its hands are doing.
     fn going_on(&self) -> Vec<Value> {
         let claimed = self.claimed();
         let waiting = self.turns.waiting_behind();
@@ -109,7 +114,7 @@ impl Running {
                 json!({
                     "conversation": going.conversation,
                     "doing": claimed.get(&going.conversation),
-                    "for": at_work::how_long(going.taken),
+                    "for": going.taken.map(at_work::how_long),
                     "waiting": waiting.get(&going.conversation).copied().unwrap_or(0),
                     "hands": hands,
                 })
@@ -547,7 +552,7 @@ fn as_picked_up(left: &[PendingTurn]) -> Vec<String> {
 /// asked stays asked, at the head of its conversation, and is tried again
 /// until the allowance is back — or another account has been switched to in
 /// the meantime. Only after most of a day is it given up as broken.
-fn wake_once_there_is_quota(runtime: &Runtime, conversation: &Arc<dyn Conversation>, standing: Standing, said: &str) -> Result<Option<String>> {
+fn wake_once_there_is_quota(runtime: &Arc<Runtime>, conversation: &Arc<dyn Conversation>, standing: Standing, said: &str) -> Result<Option<String>> {
     let mut waits = 0;
     loop {
         // Only said when the limit was really hit: the limit's own message is

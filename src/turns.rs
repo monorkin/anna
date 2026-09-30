@@ -59,8 +59,8 @@ impl Turns {
     }
 
     /// How much is stacked up behind each conversation's running turn. A
-    /// thread deep in a hand can't hear anything, so this is where a message
-    /// that looks ignored actually is.
+    /// thread can't hear anything until its turn ends, so this is where a
+    /// message that looks ignored actually is.
     pub fn waiting_behind(&self) -> HashMap<String, usize> {
         self.waiting.lock().unwrap().iter().map(|(conversation, queue)| (conversation.clone(), queue.len())).collect()
     }
