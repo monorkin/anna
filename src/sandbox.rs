@@ -101,8 +101,8 @@ pub struct Outside {
 /// mid-review. Past the first share a session is slowed down, past the
 /// second it is stopped. It may swap as much again: without swap, one slowed
 /// down past its share has nowhere to put what it needs, the pressure that
-/// builds has systemd-oomd kill it long before its ceiling, and a fat-LTO
-/// link of shop was killed that way twice at under 12G of 29.
+/// builds has systemd-oomd kill it long before its ceiling: a fat-LTO link
+/// of a large workspace was killed that way twice at under 12G of 29.
 const SLOWED_PAST: &str = "MemoryHigh=40%";
 const MOST_MEMORY: &str = "MemoryMax=50%";
 const MOST_SWAP: &str = "MemorySwapMax=50%";

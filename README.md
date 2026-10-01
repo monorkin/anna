@@ -20,16 +20,49 @@ and learns and improves over time while also being token efficient.
 Before you start, you'll have to have Claude Code installed and at least 
 one active subscription for it.
 
-The easiest way to install Anna is through mise. Just run the following:
+The easiest way to install Anna is through [mise](https://mise.jdx.dev):
 
 ```bash
-# TODO
+mise use -g github:monorkin/anna
 ```
+
+mise hides releases younger than 24 hours by default (`minimum_release_age`).
+If the latest release is fresher than that, pin the version instead:
+
+```bash
+mise use -g github:monorkin/anna@v0.1.0
+```
+
+On [Omarchy](https://omarchy.org):
+
+```bash
+omarchy-mise-install github:monorkin/anna anna
+```
+
+Her hands run in [bubblewrap](https://github.com/containers/bubblewrap) and
+reach their services through `socat`, so install both from your distribution.
+If [mr-boxington](https://mr-boxington.jdx.dev) is among your global mise
+tools, her hands build Rust through it, with a cache of her own.
 
 Once installed, start the setup process. It will guide you through everything:
 
 ```bash
 anna setup
+```
+
+## Upgrading
+
+```bash
+anna upgrade           # to the latest release
+anna upgrade 0.2.0     # or to a specific one
+```
+
+This moves the mise install forward and points her service at the new
+binary. She keeps running the old one until you restart her, so pick a
+moment when her hands aren't in the middle of something:
+
+```bash
+anna restart
 ```
 
 ## Usage
@@ -132,3 +165,27 @@ broker.
    | thread is done with it     |        |          |  |          |
    +----------------------------+        +----------+  +----------+
 ```
+
+## Building
+
+```bash
+mise trust && mise install         # rust, mr-boxington, cross, and gh, from mise.toml
+cargo build --release              # → target/release/anna
+sudo make install                  # → /usr/bin/anna
+```
+
+A local `make install` just needs the host toolchain. With mise, cargo runs
+through [mr-boxington](https://mr-boxington.jdx.dev), so git worktrees and
+sibling checkouts share compiled crates instead of each growing a full
+`target/`.
+
+Cutting a release (`make release`, or `make build-all` on its own)
+cross-builds static musl binaries for amd64 and arm64, which needs
+[`cross`](https://github.com/cross-rs/cross) and a running Docker or Podman:
+
+```bash
+make release        # builds both targets, publishes the GitHub release
+```
+
+`Cross.toml` pins the `:main` cross images — the default pinned images ship a
+glibc too old to run a current rustc's build scripts.

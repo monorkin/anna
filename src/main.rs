@@ -49,6 +49,7 @@ mod toolchains;
 mod transcripts;
 mod triggers;
 mod turns;
+mod upgrade;
 mod work_tools;
 mod workshop;
 
@@ -71,6 +72,11 @@ struct Cli {
 enum Command {
     /// Walk through the one-time setup; safe to run again
     Setup,
+    /// Upgrade a mise install to the latest release, and point her service at it
+    Upgrade {
+        /// Target a specific release instead of the latest
+        version: Option<String>,
+    },
     /// Bring Anna up in the background, through systemd when the service is installed
     Start,
     /// Stop Anna and everything she started
@@ -254,6 +260,7 @@ const KATAMI_RUNS_ITSELF_AS: [&str; 3] = ["hook", "review", "curate"];
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Setup => setup::run(),
+        Command::Upgrade { version } => upgrade::run(version.as_deref()),
         Command::Start => lifecycle::start(),
         Command::Stop => lifecycle::stop(),
         Command::Restart => lifecycle::restart(),

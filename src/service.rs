@@ -21,17 +21,23 @@ pub fn installed() -> bool {
 }
 
 pub fn install(agent: &str, start_at_boot: bool) -> Result<()> {
-    let path = unit_path().context("could not determine the home directory")?;
     let executable = std::env::current_exe().context("could not determine Anna's own path")?;
-    let search_path = std::env::var("PATH").unwrap_or_default();
-
-    fsutil::write_private(&path, &unit(agent, &executable, &search_path))?;
-    systemctl(&["daemon-reload"])?;
+    point_at(agent, &executable)?;
     systemctl(&["enable", NAME])?;
     if start_at_boot {
         linger()?;
     }
     Ok(())
+}
+
+/// The unit names the binary it runs by its path, and a mise install's path
+/// carries its version: after an upgrade the unit would start the old one
+/// until it is pointed at the new.
+pub fn point_at(agent: &str, executable: &Path) -> Result<()> {
+    let path = unit_path().context("could not determine the home directory")?;
+    let search_path = std::env::var("PATH").unwrap_or_default();
+    fsutil::write_private(&path, &unit(agent, executable, &search_path))?;
+    systemctl(&["daemon-reload"])
 }
 
 pub fn start() -> Result<()> {
