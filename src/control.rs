@@ -24,6 +24,8 @@ use std::time::Duration;
 
 use crate::paths;
 
+const SECONDS_TO_ANSWER: u64 = 10;
+
 pub trait Controls: Send + Sync {
     fn status(&self) -> Value;
     fn poke(&self, source: Option<&str>) -> Result<String>;
@@ -109,15 +111,19 @@ fn answer(connection: UnixStream, controls: &dyn Controls) -> Result<()> {
     Ok(())
 }
 
-/// Asks the running Anna something. An error means nobody is listening.
+/// Asks the running Anna something. The error says which it was: nobody
+/// listening, or her listening and not answering — a database stuck behind
+/// a slow disk looked exactly like her being gone.
 pub fn ask(request: Value) -> Result<Value> {
     let mut connection = UnixStream::connect(paths::control_socket()).context("Anna isn't running")?;
-    connection.set_read_timeout(Some(Duration::from_secs(10)))?;
+    connection.set_read_timeout(Some(Duration::from_secs(SECONDS_TO_ANSWER)))?;
     writeln!(connection, "{request}")?;
 
     let mut line = String::new();
-    BufReader::new(connection).read_line(&mut line)?;
-    serde_json::from_str(&line).context("Anna gave no answer")
+    BufReader::new(connection)
+        .read_line(&mut line)
+        .with_context(|| format!("Anna is running but didn't answer within {SECONDS_TO_ANSWER} seconds"))?;
+    serde_json::from_str(&line).context("Anna is running but gave no answer")
 }
 
 pub fn is_running() -> bool {

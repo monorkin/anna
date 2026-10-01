@@ -162,6 +162,11 @@ impl Store {
         }
         let connection = Connection::open(path).with_context(|| format!("could not open {}", path.display()))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
+        // A commit waits for the disk only at checkpoints, not every time: with
+        // a disk busy freeing a terabyte, one waiting commit held the write
+        // lock past every other writer's patience. A crash can lose the last
+        // commits, never the database.
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.busy_timeout(std::time::Duration::from_secs(10))?;
 
         let store = Store { connection };
@@ -181,13 +186,20 @@ impl Store {
         Ok(())
     }
 
-    /// The version is read inside the transaction that acts on it, and the
-    /// transaction takes the write lock up front: two processes opening a
-    /// new database at once would otherwise both see version 0, and the
-    /// second would fail on tables the first had just made. A database from
-    /// a newer Anna is refused rather than written to with an old idea of
-    /// what is in it.
+    /// Every open lands here, so a database that is already current is left
+    /// alone: taking the write lock just to look would queue every read —
+    /// her status included — behind whatever write is slow. Otherwise the
+    /// version is read again inside the transaction that acts on it, and the
+    /// transaction takes the write lock up front: two processes opening a new
+    /// database at once would otherwise both see version 0, and the second
+    /// would fail on tables the first had just made. A database from a newer
+    /// Anna is refused rather than written to with an old idea of what is in
+    /// it.
     fn migrate(&self) -> Result<()> {
+        if self.version()? == MIGRATIONS.len() {
+            return Ok(());
+        }
+
         self.connection.execute_batch("BEGIN IMMEDIATE")?;
         let migrated = self.migrate_from_where_it_is();
         if migrated.is_ok() {
@@ -198,8 +210,12 @@ impl Store {
         migrated
     }
 
+    fn version(&self) -> Result<usize> {
+        Ok(self.connection.pragma_query_value(None, "user_version", |row| row.get(0))?)
+    }
+
     fn migrate_from_where_it_is(&self) -> Result<()> {
-        let version: usize = self.connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let version = self.version()?;
         if version > MIGRATIONS.len() {
             bail!("the database is from a newer Anna (version {version}, and this one knows {}); update her before starting", MIGRATIONS.len());
         }
@@ -530,6 +546,22 @@ mod tests {
         assert_eq!(store.turns_left().unwrap().iter().map(|it| it.id).collect::<Vec<_>>(), [second]);
         store.forget_turn(second).unwrap();
         assert!(store.turns_left().unwrap().is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_current_database_opens_and_reads_while_a_write_holds_the_lock() {
+        let (store, directory) = store("locked");
+        store.keep_turn(&origin("card-1"), true, "fix the login", "2026-10-01T09:00:00Z").unwrap();
+
+        let writer = Connection::open(directory.join("anna.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let began = std::time::Instant::now();
+        let reader = Store::open_at(&directory.join("anna.db")).unwrap();
+        assert_eq!(reader.turns_left().unwrap().len(), 1);
+        assert!(began.elapsed() < std::time::Duration::from_secs(2), "it waited on the write: {:?}", began.elapsed());
+
+        writer.execute_batch("ROLLBACK").unwrap();
         std::fs::remove_dir_all(directory).unwrap();
     }
 

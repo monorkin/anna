@@ -19,7 +19,6 @@ use crate::secrets;
 const LOG_LINES: usize = 500;
 
 /// Everything on the dashboard at one moment.
-#[derive(Default)]
 pub struct Snapshot {
     pub accounts: Vec<Account>,
     /// Why there are no accounts to show, when ax couldn't say.
@@ -28,8 +27,8 @@ pub struct Snapshot {
     pub jev: Option<Vec<[String; 2]>>,
     /// The newest lines of the log, as `anna log` colours them.
     pub log: Vec<String>,
-    /// None when Anna isn't running.
-    pub now: Option<Now>,
+    /// Or why it can't be had: she isn't running, or didn't answer.
+    pub now: Result<Now, String>,
 }
 
 /// One Claude account and how full its limits are.
@@ -81,7 +80,7 @@ pub fn gather(with_jev: bool) -> Snapshot {
         accounts_unknown,
         jev: with_jev.then(|| jev_rows(&JevRequests::in_log(&fs::read_to_string(paths::log_file()).unwrap_or_default(), &a_day_ago()))),
         log: logs::newest_styled(LOG_LINES),
-        now: control::ask(json!({ "command": "status" })).ok().map(|it| now_of(&it["status"])),
+        now: control::ask(json!({ "command": "status" })).map(|it| now_of(&it["status"])).map_err(|error| format!("{error}.")),
     }
 }
 

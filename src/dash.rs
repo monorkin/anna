@@ -110,7 +110,7 @@ impl Dash {
 
     fn take(&mut self, snapshot: Snapshot) {
         if self.thread.is_none() {
-            self.thread = snapshot.now.as_ref().and_then(|it| it.threads.first().cloned());
+            self.thread = snapshot.now.as_ref().ok().and_then(|it| it.threads.first().cloned());
         }
         self.snapshot = Some(snapshot);
     }
@@ -195,7 +195,7 @@ impl Dash {
     }
 
     fn threads(&self) -> Vec<String> {
-        self.snapshot.as_ref().and_then(|it| it.now.as_ref()).map(|it| it.threads.clone()).unwrap_or_default()
+        self.snapshot.as_ref().and_then(|it| it.now.as_ref().ok()).map(|it| it.threads.clone()).unwrap_or_default()
     }
 
     fn pane(&self) -> Pane {
@@ -248,8 +248,8 @@ impl Dash {
         frame.render_widget(block, area);
 
         let now = match self.snapshot.as_ref().map(|it| it.now.as_ref()) {
-            Some(Some(now)) => now,
-            Some(None) => return frame.render_widget(Paragraph::new("Anna isn't running."), inner),
+            Some(Ok(now)) => now,
+            Some(Err(why)) => return frame.render_widget(Paragraph::new(why.as_str()), inner),
             None => return frame.render_widget(Paragraph::new("Looking…"), inner),
         };
         let [going_on, claimed] = Layout::vertical([Constraint::Length(now.going_on.len().max(1) as u16 + 3), Constraint::Min(0)]).areas(inner);
@@ -392,7 +392,7 @@ mod tests {
     fn dash_with_threads(threads: &[&str]) -> Dash {
         let mut dash = Dash::default();
         let now = Now { threads: threads.iter().map(|it| it.to_string()).collect(), ..Now::default() };
-        dash.take(Snapshot { now: Some(now), ..Snapshot::default() });
+        dash.take(Snapshot { accounts: Vec::new(), accounts_unknown: None, jev: None, log: Vec::new(), now: Ok(now) });
         dash
     }
 

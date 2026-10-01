@@ -87,7 +87,7 @@ pub fn status() -> Result<()> {
                 None => println!("Conversations going on: {}", status["conversations"]),
             }
         }
-        Err(_) => println!("Anna isn't running."),
+        Err(error) => println!("{error}."),
     }
     Ok(())
 }
