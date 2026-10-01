@@ -7,11 +7,19 @@ machines or their other projects belongs in it — not in code, not in tests,
 not in notes, and not in a commit message. What Anna knows about a particular
 person lives in her config (`~/.config/anna`), never here.
 
+The only projects this repository names are anna, katami, ax and tinyclass.
+No other codebase, repository or product someone works on — the ones Anna
+works in least of all — appears anywhere: not in code, tests, comments, notes,
+commit messages or branch names. Tests and examples use invented projects
+(`shop`, `blog`). The services Anna talks to (Basecamp, HEY, Fizzy, GitHub,
+Sentry) and the tools she runs on (Claude Code, mise, mbx, bubblewrap) are
+what she is built from, and may be named.
+
 Keep out:
 
 - Names of people, companies and products they work on. Tests use invented
-  people (Marta, Marko), `example.com` addresses, and plain words for choices
-  ("Personal", "Work").
+  people (Marta, Marko), invented projects (`shop`, `blog`), `example.com`
+  addresses, and plain words for choices ("Personal", "Work").
 - Account, project, bucket, person and recording ids from any integration,
   and any signed id or URL that carries one.
 - Machine names, internal hostnames, user names and absolute paths under a

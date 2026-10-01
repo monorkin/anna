@@ -189,3 +189,7 @@ make release        # builds both targets, publishes the GitHub release
 
 `Cross.toml` pins the `:main` cross images — the default pinned images ship a
 glibc too old to run a current rustc's build scripts.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
