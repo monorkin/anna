@@ -20,15 +20,22 @@ use std::time::Duration;
 use crate::config::Models;
 use crate::deadline;
 use crate::paths;
-use crate::toolchains::Toolchains;
+use crate::toolchains::{Mbx, Toolchains};
 
 /// The shell that runs inside: socat turns the proxy's socket into the
 /// localhost proxy Claude Code is pointed at, does the same for every
-/// service the session was granted, and hands over to claude.
-fn inside(services: &[Service]) -> String {
+/// service the session was granted, `cargo` becomes mbx where there is one,
+/// and it hands over to claude.
+fn inside(services: &[Service], mbx: Option<&Mbx>) -> String {
     let mut script = String::from("\nsocat TCP-LISTEN:3128,fork,bind=127.0.0.1 UNIX-CONNECT:/run/proxy.sock &\n");
     for (n, service) in services.iter().enumerate() {
         script.push_str(&format!("socat TCP-LISTEN:{},fork,bind=127.0.0.1 UNIX-CONNECT:/run/service-{n}.sock &\n", service.port));
+    }
+    if let Some(mbx) = mbx {
+        script.push_str(&format!(
+            "mkdir -p {MBX_SHIM_INSIDE}\ncat > {MBX_SHIM_INSIDE}/cargo <<'SHIM'\n#!/bin/sh\nMBX_CARGO_SHIM_MODE=1 MBX_CARGO_SHIM_PATH={MBX_SHIM_INSIDE}/cargo exec {} \"$@\"\nSHIM\nchmod +x {MBX_SHIM_INSIDE}/cargo\n",
+            mbx.binary.display()
+        ));
     }
     script.push_str("sleep 0.3\nexec /opt/claude \"$@\"\n");
     script
@@ -51,11 +58,14 @@ const WORKS_OFFLINE: [(&str, &str); 5] = [
     ("npm_config_offline", "true"),
     ("BUNDLE_FROZEN", "true"),
 ];
-/// Where a session builds. Never the project's own target folder: that is
-/// often a link into a cache the sandbox can't see, and what a hand builds
-/// shouldn't land where the person's own builds are picked up from.
+/// Where a session builds when mbx doesn't keep its target folder. Never the
+/// project's own target folder: what a session builds shouldn't land where
+/// the person's own builds are picked up from.
 const BUILD_INSIDE: &str = "/build";
 const CARGO_INSIDE: &str = "/home/hand/.cargo";
+/// Where `cargo` is mbx, first on the PATH. In the session's own /tmp: it is
+/// written as the session starts, and goes with it.
+const MBX_SHIM_INSIDE: &str = "/tmp/mbx";
 
 /// A port on the host's loopback that a session may reach as the same port
 /// on its own: a database for the tests, say. On the host, socat listens on
@@ -207,12 +217,13 @@ impl Sandbox<'_> {
             .arg("--bind")
             .arg(&self.profile)
             .arg("/profile")
-            .arg("--bind")
-            .arg(&self.build_dir)
-            .arg(BUILD_INSIDE)
             .arg("--ro-bind")
             .arg(self.registries.as_ref().unwrap_or(&self.outside.proxy_socket))
             .arg("/run/proxy.sock");
+        if !self.mbx_keeps_the_target() {
+            command.arg("--bind").arg(&self.build_dir).arg(BUILD_INSIDE);
+            command.args(["--setenv", "CARGO_TARGET_DIR", BUILD_INSIDE]);
+        }
         if let Some(broker_socket) = &self.broker_socket {
             command.arg("--ro-bind").arg(broker_socket).arg(BROKER_INSIDE);
         }
@@ -225,10 +236,9 @@ impl Sandbox<'_> {
             .arg(&self.project)
             .args(["--setenv", "HOME", "/home/hand"])
             .args(["--setenv", "LANG", "C.UTF-8"])
-            .args(["--setenv", "PATH", &self.outside.toolchains.path()])
+            .args(["--setenv", "PATH", &self.path()])
             .args(["--setenv", "CLAUDE_CONFIG_DIR", "/profile"])
             .args(["--setenv", "HTTPS_PROXY", "http://127.0.0.1:3128"])
-            .args(["--setenv", "CARGO_TARGET_DIR", BUILD_INSIDE])
             .args(["--setenv", "CARGO_HOME", CARGO_INSIDE])
             .args(["--setenv", "CARGO_BUILD_JOBS", &build_jobs().to_string()])
             .args(["--setenv", "GIT_TERMINAL_PROMPT", "0"])
@@ -238,8 +248,31 @@ impl Sandbox<'_> {
         }
         command
             .args(DOES_ITS_OWN_WORK.iter().flat_map(|name| ["--setenv", name, "1"]))
-            .args(["/usr/bin/bash", "-c", &inside(&self.services), "sandbox"]);
+            .args(["/usr/bin/bash", "-c", &inside(&self.services, self.outside.toolchains.mbx.as_ref()), "sandbox"]);
         command
+    }
+
+    /// mbx keeps a session's target folder in her store, behind a `target`
+    /// link in the project, and prunes it to a budget. Only where it can: a
+    /// reviewer can't write that link, so it uses one only when the hand left
+    /// it there; and a target that is a plain folder is the person's own
+    /// build, which no session builds into.
+    fn mbx_keeps_the_target(&self) -> bool {
+        let Some(mbx) = &self.outside.toolchains.mbx else {
+            return false;
+        };
+        let target = self.project.join("target");
+        match std::fs::read_link(&target) {
+            Ok(link) => self.writable || link.starts_with(&mbx.store),
+            Err(_) => self.writable && !target.exists(),
+        }
+    }
+
+    fn path(&self) -> String {
+        match &self.outside.toolchains.mbx {
+            Some(_) => format!("{MBX_SHIM_INSIDE}:{}", self.outside.toolchains.path()),
+            None => self.outside.toolchains.path(),
+        }
     }
 
     /// Claude Code's own tools for a session in here, for its `--tools`:
@@ -273,6 +306,12 @@ impl Sandbox<'_> {
                 let name = cache.file_name().unwrap_or_default().to_string_lossy();
                 command.arg("--overlay-src").arg(cache).arg("--tmp-overlay").arg(format!("{CARGO_INSIDE}/{name}"));
             }
+        }
+        // Where it is outside, because the `target` link mbx leaves in the
+        // project has to lead somewhere on both sides
+        if let Some(mbx) = &self.outside.toolchains.mbx {
+            command.arg("--bind").arg(&mbx.store).arg(&mbx.store);
+            command.arg("--setenv").arg("MBX_CACHE_DIR").arg(&mbx.store);
         }
     }
 
@@ -602,12 +641,15 @@ mod tests {
         if crate::paths::program("bwrap").is_none() || crate::paths::program("socat").is_none() {
             return;
         }
-        let toolchains = Toolchains::discover();
-        let Some(rust) = &toolchains.rust else {
-            return;
-        };
         let root = std::env::temp_dir().join(format!("anna-sandbox-rust-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
+        let mut toolchains = Toolchains::discover();
+        let Some(rust) = toolchains.rust.clone() else {
+            return;
+        };
+        // mbx where this machine has it, with a store of the test's own
+        toolchains.mbx = toolchains.mbx.take().map(|mbx| Mbx { store: root.join("mbx"), ..mbx });
+        fs::create_dir_all(root.join("mbx")).unwrap();
         let project = root.join("crate");
         fs::create_dir_all(project.join("src")).unwrap();
         fs::create_dir_all(root.join("profile")).unwrap();
@@ -650,17 +692,23 @@ mod tests {
             registries: None,
             scratch: root.join("scratch"),
         };
-        let script = format!("cargo run -q 2>&1; ls /build | head -1; echo | socat - TCP:127.0.0.1:{port}; cat ~/.cargo/credentials.toml 2>/dev/null && echo LEAKED");
+        let script = format!("cargo run -q 2>&1; echo | socat - TCP:127.0.0.1:{port}; cat ~/.cargo/credentials.toml 2>/dev/null && echo LEAKED");
         let output = sandbox.claude(Path::new("/usr/bin/bash")).args(["-c", &script]).output().unwrap();
         let said = String::from_utf8_lossy(&output.stdout);
         let _ = bridge.kill();
         let _ = bridge.wait();
 
         assert!(said.contains("pid true"), "the crate built and ran offline:\n{said}\n{}", String::from_utf8_lossy(&output.stderr));
-        assert!(said.contains("debug"), "and built into /build:\n{said}");
         assert!(said.contains("hello from the host"), "and the service answered:\n{said}");
         assert!(!said.contains("LEAKED"));
-        assert!(root.join("build/debug").exists());
+        match &outside.toolchains.mbx {
+            Some(mbx) => {
+                let target = fs::read_link(project.join("target")).expect("mbx keeps the target, behind a link");
+                assert!(target.starts_with(&mbx.store), "in her store: {}", target.display());
+                assert!(target.join("debug").exists());
+            }
+            None => assert!(root.join("build/debug").exists(), "built into /build"),
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -705,6 +753,7 @@ mod tests {
                 installs: Some(installs.clone()),
                 bins: vec![installs.join("ruby/3.4.7/bin")],
                 rust: None,
+                mbx: None,
             },
             time_limit: Duration::from_secs(60),
             gitconfig: Some(PathBuf::from("/home/someone/.config/anna/tools/gitconfig")),
@@ -730,6 +779,7 @@ mod tests {
         assert!(arguments[..bwrap].iter().any(|it| it.starts_with("TasksMax=")));
 
         assert_eq!(binds(&arguments, "--bind"), [("/data/hands/h1/tmp", "/tmp"), ("/data/hands/h1/home", "/home/hand"), ("/data/reviews/r1/profile", "/profile"), ("/data/builds/abc", BUILD_INSIDE)]);
+        assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "CARGO_TARGET_DIR" && it[2] == BUILD_INSIDE), "without mbx, builds go to a folder of their own");
         assert!(binds(&arguments, "--ro-bind").contains(&(installs.to_str().unwrap(), installs.to_str().unwrap())));
         assert!(binds(&arguments, "--ro-bind").contains(&("/home/someone/.config/anna/tools/gitconfig", "/home/hand/.gitconfig")), "her commits are authored as her");
         assert!(arguments.windows(3).any(|it| {
@@ -738,5 +788,52 @@ mod tests {
         assert!(binds(&arguments, "--ro-bind").contains(&("/home/someone/project", "/home/someone/project")));
         assert!(binds(&arguments, "--ro-bind").contains(&("/run/anna/hand-h1.sock", BROKER_INSIDE)));
         assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "MISE_TRUSTED_CONFIG_PATHS" && it[2] == "/home/someone/project"));
+    }
+
+    #[test]
+    fn with_mbx_cargo_is_mbx_and_it_keeps_every_target_it_may() {
+        let root = std::env::temp_dir().join(format!("anna-sandbox-mbx-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let store = root.join("store");
+        fs::create_dir_all(&store).unwrap();
+        let outside = Outside {
+            proxy_socket: PathBuf::from("/run/anna/proxy.sock"),
+            toolchains: Toolchains { mbx: Some(Mbx { binary: PathBuf::from("/installs/mr-boxington/1.10.0/mbx"), store: store.clone() }), ..Toolchains::default() },
+            time_limit: Duration::from_secs(60),
+            gitconfig: None,
+            scopes: false,
+            models: Models::default(),
+        };
+        let sandbox = |project: &str, writable| Sandbox {
+            project: root.join(project),
+            profile: PathBuf::from("/data/hands/h1/profile"),
+            outside: &outside,
+            broker_socket: None,
+            writable,
+            build_dir: PathBuf::from("/data/builds/abc"),
+            services: Vec::new(),
+            registries: None,
+            scratch: PathBuf::from("/data/hands/h1"),
+        };
+        for project in ["fresh", "linked", "own-build"] {
+            fs::create_dir_all(root.join(project)).unwrap();
+        }
+        std::os::unix::fs::symlink(store.join("targets/v1/abc"), root.join("linked/target")).unwrap();
+        fs::create_dir_all(root.join("own-build/target")).unwrap();
+
+        let arguments = arguments_of(&sandbox("fresh", true));
+        let store_path = store.to_str().unwrap();
+        assert!(binds(&arguments, "--bind").contains(&(store_path, store_path)), "the store is where it is outside, writable");
+        assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "MBX_CACHE_DIR" && it[2] == store_path));
+        assert!(arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "PATH" && it[2].starts_with("/tmp/mbx:")));
+        let script = arguments.iter().find(|it| it.contains("cat > /tmp/mbx/cargo")).expect("the shim is written as the session starts");
+        assert!(script.contains("MBX_CARGO_SHIM_MODE=1 MBX_CARGO_SHIM_PATH=/tmp/mbx/cargo exec /installs/mr-boxington/1.10.0/mbx \"$@\""));
+
+        let builds_in_its_own_folder = |arguments: &[String]| arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == "CARGO_TARGET_DIR");
+        assert!(!builds_in_its_own_folder(&arguments), "a hand in a fresh worktree builds where mbx keeps it");
+        assert!(!builds_in_its_own_folder(&arguments_of(&sandbox("linked", false))), "a reviewer builds where the hand's link leads");
+        assert!(builds_in_its_own_folder(&arguments_of(&sandbox("fresh", false))), "a reviewer can't make the link");
+        assert!(builds_in_its_own_folder(&arguments_of(&sandbox("own-build", true))), "the person's own target folder is never built into");
+        fs::remove_dir_all(root).unwrap();
     }
 }

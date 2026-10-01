@@ -34,6 +34,7 @@ pub struct Toolchains {
     pub installs: Option<PathBuf>,
     pub bins: Vec<PathBuf>,
     pub rust: Option<Rust>,
+    pub mbx: Option<Mbx>,
 }
 
 /// One rustup toolchain, and cargo's caches.
@@ -42,6 +43,18 @@ pub struct Rust {
     pub toolchain: PathBuf,
     /// cargo's `registry` and `git` folders, when they exist.
     pub caches: Vec<PathBuf>,
+}
+
+/// mr boxington, from the person's own tools, with a store of her own: one
+/// cache of compiled dependencies and one set of target folders for every
+/// session, kept to a budget and pruned by mbx itself. Without it each
+/// worktree compiled the world into a folder nothing ever pruned, and two
+/// dozen of them filled the disk. Not the person's store: their builds would
+/// pick up what a sandboxed session compiled.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mbx {
+    pub binary: PathBuf,
+    pub store: PathBuf,
 }
 
 impl Toolchains {
@@ -54,6 +67,11 @@ impl Toolchains {
             None => Toolchains::default(),
         };
         toolchains.rust = Rust::discover(&home);
+        toolchains.mbx = mbx_among(&toolchains.bins).and_then(|binary| {
+            let store = paths::data_dir().join("mbx");
+            paths::make_private_dir(&store).ok()?;
+            Some(Mbx { binary, store })
+        });
         toolchains
     }
 
@@ -94,10 +112,15 @@ impl Toolchains {
                     .collect(),
                 installs: Some(installs),
                 rust: None,
+                mbx: None,
             },
             None => Toolchains::default(),
         }
     }
+}
+
+fn mbx_among(bins: &[PathBuf]) -> Option<PathBuf> {
+    bins.iter().map(|it| it.join("mbx")).find(|it| it.is_file())
 }
 
 impl Rust {
@@ -173,8 +196,22 @@ mod tests {
         std::fs::write(rustup.join("toolchains/1.97.1-x86_64/bin/cargo"), "").unwrap();
         assert_eq!(Rust::in_folders(&rustup, &cargo).unwrap().toolchain, rustup.join("toolchains/1.97.1-x86_64"));
 
-        let toolchains = Toolchains { installs: None, bins: Vec::new(), rust: Rust::in_folders(&rustup, &cargo) };
+        let toolchains = Toolchains { installs: None, bins: Vec::new(), rust: Rust::in_folders(&rustup, &cargo), mbx: None };
         assert_eq!(toolchains.path(), format!("{}:/usr/bin", rustup.join("toolchains/1.97.1-x86_64/bin").display()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mbx_is_found_among_the_persons_tools() {
+        let root = std::env::temp_dir().join(format!("anna-mbx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (node, boxington) = (root.join("node/26/bin"), root.join("mr-boxington/1.10.0"));
+        std::fs::create_dir_all(&node).unwrap();
+        std::fs::create_dir_all(&boxington).unwrap();
+        assert_eq!(mbx_among(&[node.clone(), boxington.clone()]), None);
+
+        std::fs::write(boxington.join("mbx"), "").unwrap();
+        assert_eq!(mbx_among(&[node, boxington.clone()]), Some(boxington.join("mbx")));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
