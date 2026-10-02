@@ -1,10 +1,14 @@
 //! What `anna dash` shows, gathered in one place: her Claude accounts and
-//! Jev's bill, what is going on now, and the end of her log. Gathering asks
-//! the running Anna, ax and the log; turning their answers into rows touches
-//! none of them, and that is the part the tests cover.
+//! Jev's bill, what is going on now, the end of her log, and her memories.
+//! Gathering asks the running Anna, ax, katami and the log; turning their
+//! answers into rows touches none of them, and that is the part the tests
+//! cover.
 
+use anyhow::Result;
 use ax::usage::Report;
+use katami::memory::{ListFilter, Listing, Memory, OverviewRow};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -29,6 +33,24 @@ pub struct Snapshot {
     pub log: Vec<String>,
     /// Or why it can't be had: she isn't running, or didn't answer.
     pub now: Result<Now, String>,
+    /// Every memory, archived ones too, the newest first; or why they
+    /// couldn't be read.
+    pub memories: Result<Vec<MemoryRow>, String>,
+}
+
+/// One memory as the dashboard lists and shows it.
+#[derive(Debug, PartialEq, Clone)]
+pub struct MemoryRow {
+    pub id: String,
+    pub kind: String,
+    pub entity: Option<String>,
+    pub title: String,
+    pub body: String,
+    pub archived: bool,
+    /// How many times it was put in front of a session, and when last.
+    pub uses: i64,
+    pub last_used: Option<String>,
+    pub updated: String,
 }
 
 /// One Claude account and how full its limits are.
@@ -61,6 +83,19 @@ pub struct Now {
     pub claimed: Vec<[String; 2]>,
     /// Every thread that can be told something, the busy ones first.
     pub threads: Vec<String>,
+    /// What is known about each of those threads, by its full name.
+    pub about: HashMap<String, ThreadNow>,
+}
+
+/// One thread's part of what is going on, for the head of its chat.
+#[derive(Default, Debug, PartialEq, Clone)]
+pub struct ThreadNow {
+    pub title: String,
+    /// How long its turn has run; none between turns.
+    pub turn_for: Option<String>,
+    pub waiting: String,
+    /// Each hand at work for it: the hand, its worktree, and how long.
+    pub hands: Vec<[String; 3]>,
 }
 
 /// Asked once: the key lives in the keyring, which isn't something to knock
@@ -81,6 +116,28 @@ pub fn gather(with_jev: bool) -> Snapshot {
         jev: with_jev.then(|| jev_rows(&JevRequests::in_log(&fs::read_to_string(paths::log_file()).unwrap_or_default(), &a_day_ago()))),
         log: logs::newest_styled(LOG_LINES),
         now: control::ask(json!({ "command": "status" })).map(|it| now_of(&it["status"])).map_err(|error| format!("{error}.")),
+        memories: memories().map_err(|error| format!("Her memories couldn't be read: {error:#}.")),
+    }
+}
+
+fn memories() -> Result<Vec<MemoryRow>> {
+    let memory = Memory::open(&katami::paths::memory_dir())?;
+    let listing = Listing { filter: ListFilter::All, kinds: Vec::new(), order: Vec::new() };
+    Ok(memory.overview(&listing)?.iter().map(memory_row).collect())
+}
+
+fn memory_row(row: &OverviewRow) -> MemoryRow {
+    let stored = &row.stored;
+    MemoryRow {
+        id: stored.id.to_string(),
+        kind: stored.kind.to_string(),
+        entity: stored.entity.clone(),
+        title: stored.title.clone(),
+        body: stored.body.clone(),
+        archived: stored.archived,
+        uses: row.uses,
+        last_used: row.last_used.clone(),
+        updated: stored.updated.clone(),
     }
 }
 
@@ -167,16 +224,25 @@ fn now_of(status: &Value) -> Now {
             let [thread, running, waiting, title] = turn_columns.clone();
             now.going_on.push([thread, running, waiting, title, String::new(), String::new(), String::new()]);
         }
+        let mut about = ThreadNow {
+            title: text(&turn["doing"]).to_string(),
+            turn_for: turn["for"].as_str().map(String::from),
+            waiting: waiting(&turn["waiting"]),
+            hands: Vec::new(),
+        };
         for (index, hand) in hands.iter().enumerate() {
-            let [thread, running, waiting, title] = if index == 0 { turn_columns.clone() } else { Default::default() };
+            let [short, running, waiting, title] = if index == 0 { turn_columns.clone() } else { Default::default() };
             let worktree = Path::new(text(&hand["project"])).file_name().map(|it| it.to_string_lossy().into_owned()).unwrap_or_default();
-            now.going_on.push([thread, running, waiting, title, text(&hand["hand"]).to_string(), worktree, text(&hand["for"]).to_string()]);
+            about.hands.push([text(&hand["hand"]).to_string(), worktree.clone(), text(&hand["for"]).to_string()]);
+            now.going_on.push([short, running, waiting, title, text(&hand["hand"]).to_string(), worktree, text(&hand["for"]).to_string()]);
         }
+        now.about.insert(thread.clone(), about);
         now.threads.push(thread);
     }
     for work in listed(&status["board"]) {
         let thread = text(&work["conversation"]).to_string();
         now.claimed.push([short_id(&thread), text(&work["doing"]).to_string()]);
+        now.about.insert(thread.clone(), ThreadNow { title: text(&work["doing"]).to_string(), ..ThreadNow::default() });
         now.threads.push(thread);
     }
     now
@@ -271,18 +337,27 @@ mod tests {
         });
 
         let row = |cells: [&str; 7]| cells.map(String::from);
+        let now = now_of(&status);
         assert_eq!(
-            now_of(&status),
-            Now {
-                going_on: vec![
-                    row(["basecamp-card-1", "14m", "3", "Fixing the login", "h18d9", "login-fix", "13m"]),
-                    row(["", "", "", "", "h18da", "login-docs", "2m"]),
-                    row(["basecamp-card-3", "1m", "", "-", "", "", ""]),
-                ],
-                claimed: vec![["basecamp-card-2".to_string(), "Waiting on review".to_string()]],
-                threads: vec!["basecamp-card-1".to_string(), "basecamp-card-3".to_string(), "basecamp-card-2".to_string()],
+            now.going_on,
+            vec![
+                row(["basecamp-card-1", "14m", "3", "Fixing the login", "h18d9", "login-fix", "13m"]),
+                row(["", "", "", "", "h18da", "login-docs", "2m"]),
+                row(["basecamp-card-3", "1m", "", "-", "", "", ""]),
+            ]
+        );
+        assert_eq!(now.claimed, vec![["basecamp-card-2".to_string(), "Waiting on review".to_string()]]);
+        assert_eq!(now.threads, ["basecamp-card-1", "basecamp-card-3", "basecamp-card-2"]);
+        assert_eq!(
+            now.about["basecamp-card-1"],
+            ThreadNow {
+                title: "Fixing the login".to_string(),
+                turn_for: Some("14m".to_string()),
+                waiting: "3".to_string(),
+                hands: vec![["h18d9", "login-fix", "13m"].map(String::from), ["h18da", "login-docs", "2m"].map(String::from)],
             }
         );
+        assert_eq!(now.about["basecamp-card-2"], ThreadNow { title: "Waiting on review".to_string(), ..ThreadNow::default() }, "a thread between turns has no turn running");
         assert_eq!(now_of(&json!({})), Now::default());
     }
 }
