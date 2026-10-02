@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::accounts;
 use crate::broker::{self, Endpoint, Tool};
 use crate::claude::{self, Reply, Started};
 use crate::clock;
@@ -20,7 +21,6 @@ use crate::proxy::{self, Bridge, Proxy};
 use crate::sandbox::{self, Outside, Sandbox, Service};
 use crate::transcripts;
 
-pub const CARRY_ON: &str = "Your run was cut off part way — the login it ran on was refreshed underneath it — and you have just been started again in the same session. Nothing you did is lost. Look at where things stand and carry on from there; when you are done, report as you would have.";
 const ON_ANOTHER_MODEL: &str = "Your run was cut off part way — the Claude allowance for the model it ran on is used up — and you have just been started again in the same session on another model. Nothing you did is lost. The limit message in your history is about that, not about anything in the project. Look at where things stand and carry on with the brief from there; when you are done, report as you would have.";
 
 pub struct Hand {
@@ -153,19 +153,22 @@ impl Hand {
     fn run(&mut self, model: &str, told: &str, outside: &Outside, started: &Started) -> Result<Reply> {
         let (id, profile) = (self.id.clone(), self.directory.join("profile"));
         // Her login was refreshed while the hand ran and the token it held
-        // was revoked with that, or the token simply expired. The session is
-        // whole: it goes on with her current token and what it had done.
-        let refresh = || {
-            logs::event("hand.login_refreshed", json!({ "hand": id }));
+        // was revoked with that, the token simply expired, or the account it
+        // was on is spent. The session is whole: it goes on with her current
+        // login and what it had done.
+        let refresh = |spent: bool| {
+            if spent {
+                accounts::moved_off_the_spent_account();
+            }
+            logs::event("hand.login_refreshed", json!({ "hand": id, "spent": spent }));
             claude::refresh_hand_login(&profile)
         };
-        claude::again_if_the_login_went_stale(refresh, |again| {
-            if again {
+        claude::again_on_her_current_login(refresh, |again| match again {
+            Some(told_again) => {
                 self.begun = true;
-                claude::reply_of(&mut self.command(model, outside)?, CARRY_ON, outside.time_limit, Some(started))
-            } else {
-                claude::reply_of(&mut self.command(model, outside)?, told, outside.time_limit, Some(started))
+                claude::reply_of(&mut self.command(model, outside)?, told_again, outside.time_limit, Some(started))
             }
+            None => claude::reply_of(&mut self.command(model, outside)?, told, outside.time_limit, Some(started)),
         })
     }
 

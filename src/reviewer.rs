@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::fs;
 
+use crate::accounts;
 use crate::claude::{self, Started};
 use crate::clock;
 use crate::hand::{self, Hand};
@@ -52,9 +53,10 @@ pub fn review(hand: &Hand, brief: &str, report: &str, outside: &Outside, started
         registries: None,
         scratch: directory.clone(),
     };
-    // A review that ran out of allowance starts over on the next model, in a
-    // session of its own. One whose login went stale goes on in the same
-    // session: a long review is too much to throw away with the hand's work.
+    // A review whose model ran out of allowance starts over on the next model,
+    // in a session of its own. One whose login went stale, or whose account
+    // was spent while she has another, goes on in the same session: a long
+    // review is too much to throw away with the hand's work.
     let outcome = claude::on_each_model(&outside.models.reviewers, |model, _| {
         let session = claude::random_session_id()?;
         let command = |continuing: bool| -> Result<std::process::Command> {
@@ -69,16 +71,16 @@ pub fn review(hand: &Hand, brief: &str, report: &str, outside: &Outside, started
             }
             Ok(command)
         };
-        let refresh = || {
-            logs::event("review.login_refreshed", json!({ "hand": hand_id }));
+        let refresh = |spent: bool| {
+            if spent {
+                accounts::moved_off_the_spent_account();
+            }
+            logs::event("review.login_refreshed", json!({ "hand": hand_id, "spent": spent }));
             claude::refresh_hand_login(&directory.join("profile"))
         };
-        claude::again_if_the_login_went_stale(refresh, |again| {
-            if again {
-                claude::reply_of(&mut command(true)?, hand::CARRY_ON, outside.time_limit, Some(started))
-            } else {
-                claude::reply_of(&mut command(false)?, &prompt(brief, report), outside.time_limit, Some(started))
-            }
+        claude::again_on_her_current_login(refresh, |again| match again {
+            Some(told_again) => claude::reply_of(&mut command(true)?, told_again, outside.time_limit, Some(started)),
+            None => claude::reply_of(&mut command(false)?, &prompt(brief, report), outside.time_limit, Some(started)),
         })
     });
     transcripts::keep(&directory.join("profile"), hand_id, true);

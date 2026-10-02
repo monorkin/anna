@@ -223,14 +223,32 @@ pub fn says_the_login_went_stale(error: &anyhow::Error) -> bool {
     error.contains("access token has been revoked") || error.contains("access token has expired")
 }
 
-/// A hand's or a reviewer's run, and once more after `refresh` when the
-/// login it ran on went stale part way. The run is told whether this is that
-/// second go, so it can resume its session instead of starting over.
-pub fn again_if_the_login_went_stale<T>(refresh: impl FnOnce() -> Result<()>, mut run: impl FnMut(bool) -> Result<T>) -> Result<T> {
-    match run(false) {
+/// What a hand's or a reviewer's session is told when it goes on in the
+/// same session on a fresh copy of her login.
+pub const CARRY_ON: &str = "Your run was cut off part way — the login it ran on was refreshed underneath it — and you have just been started again in the same session. Nothing you did is lost. Look at where things stand and carry on from there; when you are done, report as you would have.";
+pub const ON_ANOTHER_ACCOUNT: &str = "Your run was cut off part way — the Claude allowance of the account it ran on is used up — and you have just been started again in the same session on another account. Nothing you did is lost. The limit message in your history is about that account, not about anything in the project. Look at where things stand and carry on from there; when you are done, report as you would have.";
+
+/// A hand's or a reviewer's run, and once more on her current login when the
+/// one it ran on can't go on and hers can: refreshed underneath it, or spent
+/// on an account she has since moved off. A hand keeps the copy it started
+/// with, so when she switched accounts every hand already running went on
+/// to the spent one's limit, and its thread told people she was out of
+/// Claude for hours. The run gets nothing the first time, and what to tell
+/// its resumed session the second. `refresh` copies her login in and says
+/// whether it is a different one; it is told when the account was spent, so
+/// it can move her off it first.
+pub fn again_on_her_current_login<T>(refresh: impl FnOnce(bool) -> Result<bool>, mut run: impl FnMut(Option<&str>) -> Result<T>) -> Result<T> {
+    match run(None) {
         Err(error) if says_the_login_went_stale(&error) => {
-            refresh()?;
-            run(true)
+            refresh(false)?;
+            run(Some(CARRY_ON))
+        }
+        Err(error) if error.downcast_ref::<OutOfQuota>().is_some() => {
+            if refresh(true)? {
+                run(Some(ON_ANOTHER_ACCOUNT))
+            } else {
+                Err(error)
+            }
         }
         outcome => outcome,
     }
@@ -447,12 +465,17 @@ pub fn write_hand_profile(profile: &Path) -> Result<()> {
 /// refreshes the token in her folder now and then and the old one is
 /// revoked with it, so a hand sent back an hour later on the copy it started
 /// with would be refused at the door and discarded, work and all.
-pub fn refresh_hand_login(profile: &Path) -> Result<()> {
+/// Says whether the copy is a different login from the one the hand had.
+pub fn refresh_hand_login(profile: &Path) -> Result<bool> {
     copy_login(&paths::claude_config_home().join(".credentials.json"), &profile.join(".credentials.json"))
 }
 
-fn copy_login(from: &Path, to: &Path) -> Result<()> {
-    write_private(to, &access_only(&read_json(from)?)?)
+fn copy_login(from: &Path, to: &Path) -> Result<bool> {
+    let had = read_json(to).ok().map(|it| it["claudeAiOauth"]["accessToken"].clone());
+    let login = access_only(&read_json(from)?)?;
+    let changed = had.as_ref() != Some(&login["claudeAiOauth"]["accessToken"]);
+    write_private(to, &login)?;
+    Ok(changed)
 }
 
 fn access_only(credentials: &Value) -> Result<Value> {
@@ -564,32 +587,59 @@ mod tests {
 
     #[test]
     fn a_run_whose_login_went_stale_goes_again_once_on_a_fresh_one() {
-        let refreshed = std::cell::RefCell::new(0);
+        let refreshed = std::cell::RefCell::new(Vec::new());
         let goes = std::cell::RefCell::new(Vec::new());
         let stale = || anyhow::anyhow!("claude reported an error: Failed to authenticate. API Error: 401 OAuth access token has been revoked.");
 
-        let outcome = again_if_the_login_went_stale(
-            || {
-                *refreshed.borrow_mut() += 1;
-                Ok(())
+        let outcome = again_on_her_current_login(
+            |spent| {
+                refreshed.borrow_mut().push(spent);
+                Ok(true)
             },
             |again| {
-                goes.borrow_mut().push(again);
-                if again {
-                    Ok("verdict")
-                } else {
-                    Err(stale())
+                goes.borrow_mut().push(again.map(str::to_string));
+                match again {
+                    Some(_) => Ok("verdict"),
+                    None => Err(stale()),
                 }
             },
         );
         assert_eq!(outcome.unwrap(), "verdict");
-        assert_eq!((*refreshed.borrow(), goes.take()), (1, vec![false, true]));
+        assert_eq!((refreshed.take(), goes.take()), (vec![false], vec![None, Some(CARRY_ON.to_string())]));
 
-        let still_stale = again_if_the_login_went_stale(|| Ok(()), |_| -> Result<()> { Err(stale()) });
+        let still_stale = again_on_her_current_login(|_| Ok(true), |_| -> Result<()> { Err(stale()) });
         assert!(still_stale.is_err(), "a second stale login is a failure, not a loop");
 
-        let other = again_if_the_login_went_stale(|| panic!("nothing to refresh"), |_| -> Result<()> { bail!("claude exited with signal: 9") });
+        let other = again_on_her_current_login(|_| panic!("nothing to refresh"), |_| -> Result<()> { bail!("claude exited with signal: 9") });
         assert!(other.is_err());
+    }
+
+    #[test]
+    fn a_run_on_a_spent_account_goes_on_on_hers_once_she_has_moved_off_it() {
+        let spent = || anyhow::Error::new(OutOfQuota { said: "You've hit your session limit · resets 7pm".to_string() });
+
+        let mut told = None;
+        let moved = again_on_her_current_login(
+            |was_spent| {
+                assert!(was_spent, "the refresh is told the account was spent, so it can move her off it");
+                Ok(true)
+            },
+            |again| match again {
+                Some(it) => {
+                    told = Some(it.to_string());
+                    Ok("verdict")
+                }
+                None => Err(spent()),
+            },
+        );
+        assert_eq!(moved.unwrap(), "verdict");
+        assert_eq!(told.as_deref(), Some(ON_ANOTHER_ACCOUNT));
+
+        let nowhere_to_go = again_on_her_current_login(|_| Ok(false), |again| -> Result<()> {
+            assert!(again.is_none(), "with no other account there is no second go");
+            Err(spent())
+        });
+        assert!(nowhere_to_go.unwrap_err().downcast_ref::<OutOfQuota>().is_some(), "and the limit is what is reported");
     }
 
     #[test]
@@ -601,13 +651,14 @@ mod tests {
         let hands = home.join("profile/.credentials.json");
 
         fs::write(&hers, r#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"secret","expiresAt":1}}"#).unwrap();
-        copy_login(&hers, &hands).unwrap();
+        assert!(copy_login(&hers, &hands).unwrap(), "a first copy is a login the hand didn't have");
         let copied: Value = read_json(&hands).unwrap();
         assert_eq!(copied["claudeAiOauth"]["accessToken"], "old");
         assert!(copied["claudeAiOauth"].get("refreshToken").is_none(), "a sandbox can never rotate the real login");
+        assert!(!copy_login(&hers, &hands).unwrap(), "the same login again is no change");
 
         fs::write(&hers, r#"{"claudeAiOauth":{"accessToken":"new","refreshToken":"secret","expiresAt":2}}"#).unwrap();
-        copy_login(&hers, &hands).unwrap();
+        assert!(copy_login(&hers, &hands).unwrap());
         assert_eq!(read_json(&hands).unwrap()["claudeAiOauth"]["accessToken"], "new", "a round after a refresh runs on the token that works");
         fs::remove_dir_all(home).unwrap();
     }
