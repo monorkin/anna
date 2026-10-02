@@ -161,13 +161,15 @@ impl Store {
             std::fs::create_dir_all(directory)?;
         }
         let connection = Connection::open(path).with_context(|| format!("could not open {}", path.display()))?;
+        // Before anything that can wait on a lock, the journal mode included:
+        // set after it, that wait was rusqlite's default five seconds
+        connection.busy_timeout(std::time::Duration::from_secs(10))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         // A commit waits for the disk only at checkpoints, not every time: with
         // a disk busy freeing a terabyte, one waiting commit held the write
         // lock past every other writer's patience. A crash can lose the last
         // commits, never the database.
         connection.pragma_update(None, "synchronous", "NORMAL")?;
-        connection.busy_timeout(std::time::Duration::from_secs(10))?;
 
         let store = Store { connection };
         store.migrate()?;

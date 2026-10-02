@@ -9,7 +9,7 @@ use anyhow::Result;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::at_work::AtWork;
@@ -50,6 +50,11 @@ pub struct Runtime {
     pub turns: Arc<Turns>,
     /// Every thread's hands, which work on between their thread's turns.
     pub hands: Arc<Hands>,
+    /// One connection open for as long as she runs. Everything else opens
+    /// the database and closes it again, and when the last connection
+    /// closes, SQLite folds the write-ahead log back in under an exclusive
+    /// lock — on a busy disk, long enough to lock every other open out.
+    _database_held_open: Mutex<Store>,
     _proxy: Proxy,
 }
 
@@ -80,7 +85,7 @@ impl Runtime {
         }
 
         let database = paths::database();
-        Store::open_at(&database)?;
+        let held_open = Mutex::new(Store::open_at(&database)?);
 
         Ok(Runtime {
             config,
@@ -95,6 +100,7 @@ impl Runtime {
             at_work: Arc::new(AtWork::default()),
             turns: Arc::new(Turns::default()),
             hands: Arc::new(Hands::default()),
+            _database_held_open: held_open,
             _proxy: proxy,
         })
     }
