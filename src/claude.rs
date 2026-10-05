@@ -267,10 +267,11 @@ pub fn random_session_id() -> Result<String> {
 }
 
 /// Claude Code says it in a sentence, not a code: "You've hit your session
-/// limit · resets 8:20pm", "Claude usage limit reached".
+/// limit · resets 8:20pm", "Claude usage limit reached", "You've hit your
+/// monthly spend limit".
 fn says_the_subscription_is_used_up(said: &str) -> bool {
     let said = said.to_lowercase();
-    said.contains("limit") && ["session", "usage", "weekly", "resets", "reached"].iter().any(|it| said.contains(it))
+    said.contains("limit") && ["session", "usage", "weekly", "monthly", "spend", "resets", "reached"].iter().any(|it| said.contains(it))
 }
 
 /// Stops a process, and everything it started, if it is still going when its
@@ -699,6 +700,7 @@ mod tests {
         assert!(error.context("the thread could not finish its turn").downcast_ref::<OutOfQuota>().is_some(), "and still is once it has been given context");
 
         assert!(says_the_subscription_is_used_up("Claude usage limit reached. Your limit will reset at 9pm."));
+        assert!(says_the_subscription_is_used_up("You've hit your monthly spend limit. Switch to another model to continue."));
         assert!(!says_the_subscription_is_used_up("Invalid API key · Please run /login"));
         assert!(!says_the_subscription_is_used_up("The file is over the size limit"));
     }
