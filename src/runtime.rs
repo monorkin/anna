@@ -86,7 +86,7 @@ impl Runtime {
 
         let database = paths::database();
         let held_open = Mutex::new(Store::open_at(&database)?);
-        let hands = Arc::new(Hands::new(config.hands_at_once));
+        let hands = Arc::new(Hands::new(config.hands_per_thread));
 
         Ok(Runtime {
             config,

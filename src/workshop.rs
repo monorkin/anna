@@ -32,12 +32,12 @@ const ROUNDS_BEFORE_RETHINKING: u32 = 3;
 const HOURS_A_HAND_WAITS: u64 = 12;
 
 /// Every hand she has, across turns and conversations. A thread only ever
-/// reaches its own. No more than `at_once` work at a time: threads woken
-/// together each started one, and they ate a day's allowance in minutes.
+/// reaches its own, and has no more than `per_thread` at work: a thread
+/// started hands by the handful, and they ate a day's allowance in minutes.
 pub struct Hands {
     waiting: Mutex<HashMap<String, Waiting>>,
     working: Mutex<HashMap<String, Working>>,
-    at_once: usize,
+    per_thread: usize,
 }
 
 struct Waiting {
@@ -55,8 +55,8 @@ struct Working {
 }
 
 impl Hands {
-    pub fn new(at_once: usize) -> Hands {
-        Hands { waiting: Mutex::default(), working: Mutex::default(), at_once }
+    pub fn new(per_thread: usize) -> Hands {
+        Hands { waiting: Mutex::default(), working: Mutex::default(), per_thread }
     }
 
     pub fn are_working(&self) -> bool {
@@ -106,16 +106,16 @@ impl Hands {
         self.working.lock().unwrap().iter().find(|(_, it)| it.project == project).map(|(id, _)| id.clone())
     }
 
-    fn refuse_if_full(&self) -> Result<()> {
-        full(&self.working.lock().unwrap(), self.at_once)
+    fn refuse_if_full(&self, conversation: &str) -> Result<()> {
+        full(&self.working.lock().unwrap(), conversation, self.per_thread).map(|_| ())
     }
 
-    /// How many more hands can start after this one. Checked again here,
-    /// under the same lock as the insert, so two threads starting a hand at
-    /// once can't both get the last place.
+    /// How many more hands the thread can start after this one. Checked
+    /// again here, under the same lock as the insert, so a thread's two
+    /// calls at once can't both get its last place.
     fn began(&self, conversation: &str, hand: &Hand, ask: &str, started: Arc<Started>) -> Result<usize> {
         let mut working = self.working.lock().unwrap();
-        full(&working, self.at_once)?;
+        let left = full(&working, conversation, self.per_thread)? - 1;
         working.insert(
             hand.id().to_string(),
             Working {
@@ -126,32 +126,21 @@ impl Hands {
                 started,
             },
         );
-        Ok(self.at_once - working.len())
+        Ok(left)
     }
 
-    /// Every hand at work, since the places are shared, but only this
-    /// conversation's in full: another thread's brief is another
-    /// conversation's business.
     fn described(&self, conversation: &str) -> String {
         let working = self.working.lock().unwrap();
-        let mut told = format!("{} of {} hands may work at once are at work.", working.len(), self.at_once);
-        for (id, it) in sorted(working.iter(), |it| it.since) {
-            if it.conversation == conversation {
-                told.push_str(&format!(
-                    "\n- {id}, yours, working in {} for {}. Asked: {}",
-                    it.project.display(),
-                    minutes(it.since),
-                    it.asked
-                ));
-            } else {
-                told.push_str(&format!("\n- {id}, another thread's, working in {} for {}", it.project.display(), minutes(it.since)));
-            }
+        let yours: Vec<_> = sorted(working.iter().filter(|(_, it)| it.conversation == conversation), |it| it.since);
+        let mut told = format!("{} of the {} hands you may have at work are at work.", yours.len(), self.per_thread);
+        for (id, it) in yours {
+            told.push_str(&format!("\n- {id}, working in {} for {}. Asked: {}", it.project.display(), minutes(it.since), it.asked));
         }
 
         let waiting = self.waiting.lock().unwrap();
         let yours: Vec<_> = sorted(waiting.iter().filter(|(_, it)| it.conversation == conversation), |it| it.since);
         if !yours.is_empty() {
-            told.push_str("\n\nDone, and waiting for you to send back or dismiss — these take no place:");
+            told.push_str("\n\nDone, and waiting for you to send back or dismiss — these don't count:");
             for (id, it) in yours {
                 told.push_str(&format!("\n- {id} in {}, done {} ago", it.hand.project().display(), minutes(it.since)));
             }
@@ -179,16 +168,17 @@ fn minutes(since: Instant) -> String {
     format!("{} min", since.elapsed().as_secs() / 60)
 }
 
-fn full(working: &HashMap<String, Working>, at_once: usize) -> Result<()> {
-    if working.len() >= at_once {
-        let ids: Vec<&str> = working.keys().map(String::as_str).collect();
+/// How many more hands the thread may start, or why it may start none.
+fn full(working: &HashMap<String, Working>, conversation: &str, per_thread: usize) -> Result<usize> {
+    let yours: Vec<&str> = working.iter().filter(|(_, it)| it.conversation == conversation).map(|(id, _)| id.as_str()).collect();
+    if yours.len() >= per_thread {
         bail!(
-            "no hand can start now: only {at_once} may work at once, and {} already are ({}). Wait until one is done, or dismiss one, then try again. Don't work around it by doing the work yourself.",
-            working.len(),
-            ids.join(", ")
+            "no hand can start now: you may have {per_thread} at work, and you have {} ({}). Wait for its verdict, or dismiss one if this matters more. Don't schedule anything to check back — the verdict wakes you — and don't work around it by doing the work yourself.",
+            yours.len(),
+            yours.join(", ")
         )
     }
-    Ok(())
+    Ok(per_thread - yours.len())
 }
 
 fn remove_if_of(waiting: &mut HashMap<String, Waiting>, conversation: &str, id: &str) -> Option<Waiting> {
@@ -210,7 +200,7 @@ pub struct Workshop {
 impl Workshop {
     /// Before a hand is set up, so a refused one costs nothing.
     pub fn refuse_if_busy(&self, project: &Path) -> Result<()> {
-        self.runtime.hands.refuse_if_full()?;
+        self.runtime.hands.refuse_if_full(self.conversation.key())?;
         let project = project.canonicalize().with_context(|| format!("{} does not exist", project.display()))?;
         match self.runtime.hands.working_in(&project) {
             Some(id) => bail!("hand {id} is still working in {}; wait for it, or dismiss it, before starting another there", project.display()),
@@ -223,7 +213,7 @@ impl Workshop {
     }
 
     pub fn send_back(&self, id: &str, notes: &str) -> Result<String> {
-        self.runtime.hands.refuse_if_full()?;
+        self.runtime.hands.refuse_if_full(self.conversation.key())?;
         let hand = self.runtime.hands.take(self.conversation.key(), id)?;
         self.send_to_work(hand, notes)
     }
@@ -322,9 +312,9 @@ impl Workshop {
 
 fn places_left(left: usize) -> String {
     match left {
-        0 => "That was the last place: no other hand, yours or another thread's, can start until one at work is done or dismissed.".to_string(),
-        1 => "1 more hand can start, across all your threads, until one is done.".to_string(),
-        left => format!("{left} more hands can start, across all your threads, until one is done."),
+        0 => "That was your last: you can't start another hand until this one's verdict comes, or you dismiss it.".to_string(),
+        1 => "You can start 1 more hand until one is done.".to_string(),
+        left => format!("You can start {left} more hands until one is done."),
     }
 }
 
@@ -400,36 +390,32 @@ mod tests {
     }
 
     #[test]
-    fn a_hand_beyond_those_allowed_at_once_is_refused_until_one_is_done() {
-        let hands = Hands::new(2);
-        hands.refuse_if_full().unwrap();
+    fn a_thread_past_its_hands_is_refused_until_one_is_done_whatever_other_threads_have() {
+        let hands = Hands::new(1);
         hands.working.lock().unwrap().insert("h1".to_string(), working("card-1", "/srv/shop", "Fix the sign-in form"));
-        hands.refuse_if_full().unwrap();
+        hands.refuse_if_full("card-2").unwrap();
         hands.working.lock().unwrap().insert("h2".to_string(), working("card-2", "/srv/blog", "Draft the release notes"));
 
-        let refused = hands.refuse_if_full().unwrap_err().to_string();
-        assert!(refused.starts_with("no hand can start now: only 2 may work at once, and 2 already are"), "{refused}");
-        assert!(refused.contains("h1") && refused.contains("h2"), "{refused}");
+        let refused = hands.refuse_if_full("card-1").unwrap_err().to_string();
+        assert!(refused.starts_with("no hand can start now: you may have 1 at work, and you have 1 (h1)."), "{refused}");
+        assert!(refused.contains("Don't schedule anything to check back"), "{refused}");
 
-        hands.ended("h2");
-        hands.refuse_if_full().unwrap();
+        hands.ended("h1");
+        hands.refuse_if_full("card-1").unwrap();
 
-        assert_eq!(places_left(0), "That was the last place: no other hand, yours or another thread's, can start until one at work is done or dismissed.");
-        assert_eq!(places_left(2), "2 more hands can start, across all your threads, until one is done.");
+        assert_eq!(places_left(0), "That was your last: you can't start another hand until this one's verdict comes, or you dismiss it.");
+        assert_eq!(places_left(2), "You can start 2 more hands until one is done.");
     }
 
     #[test]
-    fn a_thread_sees_every_hand_at_work_but_only_its_own_briefs() {
+    fn a_thread_sees_only_its_own_hands() {
         let hands = Hands::new(2);
         hands.working.lock().unwrap().insert("h1".to_string(), working("card-1", "/srv/shop", "Fix the sign-in form"));
         hands.working.lock().unwrap().insert("h2".to_string(), working("card-2", "/srv/blog", "Draft the release notes"));
 
-        let told = hands.described("card-1");
         assert_eq!(
-            told,
-            "2 of 2 hands may work at once are at work.\
-             \n- h1, yours, working in /srv/shop for 0 min. Asked: Fix the sign-in form\
-             \n- h2, another thread's, working in /srv/blog for 0 min"
+            hands.described("card-1"),
+            "1 of the 2 hands you may have at work are at work.\n- h1, working in /srv/shop for 0 min. Asked: Fix the sign-in form"
         );
     }
 
