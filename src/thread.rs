@@ -61,6 +61,19 @@ const WHO: &str = "working as a colleague rather than a tool. Someone is talking
 /// the exception: reading what a tool of hers takes changes nothing.
 const BUILT_IN_TOOLS_WITHOUT_TRUST: &str = "Skill";
 
+/// On a trusted word: the shell, files, the web, and what a background
+/// shell printed. Not agents or workflows — each sub-agent is a whole
+/// session of its own, and hands are how work is split — and nothing that
+/// wakes her later, which is what schedules are for.
+const BUILT_IN_TOOLS_ON_TRUST: &str = "Bash,Read,Edit,Write,Glob,Grep,Skill,ToolSearch,TaskOutput,TaskStop,WebFetch,WebSearch";
+
+fn built_in_tools(standing: Standing) -> &'static str {
+    match standing {
+        Standing::Trusted => BUILT_IN_TOOLS_ON_TRUST,
+        Standing::CanAssignWork => BUILT_IN_TOOLS_WITHOUT_TRUST,
+    }
+}
+
 const ON_A_TRUSTED_WORD: &str = "This turn runs on the word of one of the people you take direction from — said here, carried by one of your threads, or come back from a hand one of those turns started. You have a shell in it, and can read and write files here.";
 
 const ON_AN_UNTRUSTED_WORD: &str = "This turn was started by someone who is not one of the people you take direction from; the message says who, and on what footing. \
@@ -293,10 +306,8 @@ fn turn(
         .args(["--dangerously-skip-permissions", "--strict-mcp-config"])
         .args(["--model", model])
         .args(["--mcp-config", &broker::mcp_config(endpoint.socket())])
-        .args(["--append-system-prompt", role]);
-    if standing == Standing::CanAssignWork {
-        command.args(["--tools", BUILT_IN_TOOLS_WITHOUT_TRUST]);
-    }
+        .args(["--append-system-prompt", role])
+        .args(["--tools", built_in_tools(standing)]);
     if session.begun {
         command.args(["--resume", &session.id]);
     } else {
@@ -382,6 +393,18 @@ mod tests {
         assert!(on_whose_word(Standing::Trusted).contains("come back from a hand"), "a verdict carries the word of the turn that started the hand");
         assert!(on_whose_word(Standing::CanAssignWork).contains("you have no shell"));
         assert!(WORKING.contains("The end of these instructions says which"));
+    }
+
+    #[test]
+    fn no_turn_can_start_agents_or_workflows_or_wake_itself() {
+        for standing in [Standing::Trusted, Standing::CanAssignWork] {
+            let tools: Vec<&str> = built_in_tools(standing).split(',').collect();
+            for spawning in ["Agent", "Task", "Workflow", "Monitor", "ScheduleWakeup", "CronCreate", "SendMessage"] {
+                assert!(!tools.contains(&spawning), "{spawning} is out");
+            }
+        }
+        assert!(built_in_tools(Standing::Trusted).split(',').any(|it| it == "Bash"), "a trusted turn keeps its shell");
+        assert_eq!(built_in_tools(Standing::CanAssignWork), "Skill");
     }
 
     #[test]
