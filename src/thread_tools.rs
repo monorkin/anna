@@ -59,7 +59,7 @@ impl Tool for StartHand {
     }
 
     fn description(&self) -> &str {
-        "Start a sandboxed worker in one project folder and give it a brief. It can read and write that folder and nothing else, has no network and none of your memory, so the brief must carry everything it needs to know. It has the languages installed here and builds from what is already fetched, so when the work needs a build, either fetch the project's dependencies yourself first (cargo fetch, bundle install, npm ci) or grant it the registries and say so in the brief. Its builds go to a folder of their own, not the project's. It works on its own: this answers at once with its id, and when it's done a reviewer checks the work against your brief and the verdict comes to you as a message of its own, in a turn of its own. Then send_back or dismiss it. Only one hand works in a folder at a time. A hand takes minutes, and whoever asked hears nothing from it, so the first hand of a turn is refused until you have told them what you're about to do, in one line, where they asked — one line, not an account of your reasoning. Only a turn nobody new is waiting on — one you scheduled for yourself, or one a hand's verdict woke, where they already heard you have it — starts a hand without a word, with `quietly`."
+        "Start a sandboxed worker in one project folder and give it a brief. It can read and write that folder and nothing else, has no network and none of your memory, so the brief must carry everything it needs to know. It has the languages installed here and builds from what is already fetched, so when the work needs a build, either fetch the project's dependencies yourself first (cargo fetch, bundle install, npm ci) or grant it the registries and say so in the brief. Its builds go to a folder of their own, not the project's. It works on its own: this answers at once with its id, and when it's done a reviewer checks the work against your brief and the verdict comes to you as a message of its own, in a turn of its own. Then send_back or dismiss it. Only one hand works in a folder at a time, and only a few across all your threads — `hands` says how many and which; when they're all taken this is refused, so wait for one to finish or dismiss one. A hand takes minutes, and whoever asked hears nothing from it, so the first hand of a turn is refused until you have told them what you're about to do, in one line, where they asked — one line, not an account of your reasoning. Only a turn nobody new is waiting on — one you scheduled for yourself, or one a hand's verdict woke, where they already heard you have it — starts a hand without a word, with `quietly`."
     }
 
     fn input_schema(&self) -> Value {
@@ -206,6 +206,28 @@ impl Tool for Dismiss {
 
     fn call(&self, arguments: &Value) -> Result<String> {
         self.workshop.dismiss(text_of(arguments, "hand")?)
+    }
+}
+
+pub struct ListHands {
+    pub workshop: Workshop,
+}
+
+impl Tool for ListHands {
+    fn name(&self) -> &str {
+        "hands"
+    }
+
+    fn description(&self) -> &str {
+        "The hands at work now — yours with what you asked of each and for how long, other threads' as places taken — how many may work at once, and your hands that are done and waiting for you to send back or dismiss. Look here before start_hand when you aren't sure there's a place, and to find a hand to dismiss."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    fn call(&self, _arguments: &Value) -> Result<String> {
+        Ok(self.workshop.described())
     }
 }
 

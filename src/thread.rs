@@ -36,7 +36,7 @@ use crate::paths;
 use crate::runtime::Runtime;
 use crate::schedule_tools::{CancelSchedule, ListSchedules, Schedule};
 use crate::work_tools::{self, ClaimWork, FinishWork, ListWork, TellThread};
-use crate::thread_tools::{ClaudeUsage, Dismiss, Reply, SendBack, StartHand};
+use crate::thread_tools::{ClaudeUsage, Dismiss, ListHands, Reply, SendBack, StartHand};
 use crate::workshop::Workshop;
 
 /// How long a thread waits on one of its own tools. Claude Code caps a tool
@@ -110,7 +110,8 @@ pub fn wake(runtime: &Arc<Runtime>, conversation: Arc<dyn Conversation>, standin
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(StartHand { workshop: workshop.clone(), spoke: spoke.clone() }),
         Box::new(SendBack { workshop: workshop.clone() }),
-        Box::new(Dismiss { workshop }),
+        Box::new(Dismiss { workshop: workshop.clone() }),
+        Box::new(ListHands { workshop }),
         Box::new(ReadHeldBack { held: runtime.held.clone(), judge: runtime.judge.clone() }),
     ];
     if answered_otherwise.is_none() {

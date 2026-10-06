@@ -32,11 +32,12 @@ const ROUNDS_BEFORE_RETHINKING: u32 = 3;
 const HOURS_A_HAND_WAITS: u64 = 12;
 
 /// Every hand she has, across turns and conversations. A thread only ever
-/// reaches its own.
-#[derive(Default)]
+/// reaches its own. No more than `at_once` work at a time: threads woken
+/// together each started one, and they ate a day's allowance in minutes.
 pub struct Hands {
     waiting: Mutex<HashMap<String, Waiting>>,
     working: Mutex<HashMap<String, Working>>,
+    at_once: usize,
 }
 
 struct Waiting {
@@ -48,10 +49,16 @@ struct Waiting {
 struct Working {
     conversation: String,
     project: PathBuf,
+    asked: String,
+    since: Instant,
     started: Arc<Started>,
 }
 
 impl Hands {
+    pub fn new(at_once: usize) -> Hands {
+        Hands { waiting: Mutex::default(), working: Mutex::default(), at_once }
+    }
+
     pub fn are_working(&self) -> bool {
         !self.working.lock().unwrap().is_empty()
     }
@@ -99,9 +106,57 @@ impl Hands {
         self.working.lock().unwrap().iter().find(|(_, it)| it.project == project).map(|(id, _)| id.clone())
     }
 
-    fn began(&self, conversation: &str, hand: &Hand, started: Arc<Started>) {
-        let working = Working { conversation: conversation.to_string(), project: hand.project().to_path_buf(), started };
-        self.working.lock().unwrap().insert(hand.id().to_string(), working);
+    fn refuse_if_full(&self) -> Result<()> {
+        full(&self.working.lock().unwrap(), self.at_once)
+    }
+
+    /// How many more hands can start after this one. Checked again here,
+    /// under the same lock as the insert, so two threads starting a hand at
+    /// once can't both get the last place.
+    fn began(&self, conversation: &str, hand: &Hand, ask: &str, started: Arc<Started>) -> Result<usize> {
+        let mut working = self.working.lock().unwrap();
+        full(&working, self.at_once)?;
+        working.insert(
+            hand.id().to_string(),
+            Working {
+                conversation: conversation.to_string(),
+                project: hand.project().to_path_buf(),
+                asked: ask.lines().next().unwrap_or_default().to_string(),
+                since: Instant::now(),
+                started,
+            },
+        );
+        Ok(self.at_once - working.len())
+    }
+
+    /// Every hand at work, since the places are shared, but only this
+    /// conversation's in full: another thread's brief is another
+    /// conversation's business.
+    fn described(&self, conversation: &str) -> String {
+        let working = self.working.lock().unwrap();
+        let mut told = format!("{} of {} hands may work at once are at work.", working.len(), self.at_once);
+        for (id, it) in sorted(working.iter(), |it| it.since) {
+            if it.conversation == conversation {
+                told.push_str(&format!(
+                    "\n- {id}, yours, working in {} for {}. Asked: {}",
+                    it.project.display(),
+                    minutes(it.since),
+                    it.asked
+                ));
+            } else {
+                told.push_str(&format!("\n- {id}, another thread's, working in {} for {}", it.project.display(), minutes(it.since)));
+            }
+        }
+
+        let waiting = self.waiting.lock().unwrap();
+        let yours: Vec<_> = sorted(waiting.iter().filter(|(_, it)| it.conversation == conversation), |it| it.since);
+        if !yours.is_empty() {
+            told.push_str("\n\nDone, and waiting for you to send back or dismiss — these take no place:");
+            for (id, it) in yours {
+                told.push_str(&format!("\n- {id} in {}, done {} ago", it.hand.project().display(), minutes(it.since)));
+            }
+        }
+        told
     }
 
     fn ended(&self, id: &str) {
@@ -112,6 +167,28 @@ impl Hands {
         let waiting = Waiting { conversation: conversation.to_string(), hand, since: Instant::now() };
         self.waiting.lock().unwrap().insert(waiting.hand.id().to_string(), waiting);
     }
+}
+
+fn sorted<'a, T: 'a>(hands: impl Iterator<Item = (&'a String, &'a T)>, since: impl Fn(&T) -> Instant) -> Vec<(&'a String, &'a T)> {
+    let mut hands: Vec<_> = hands.collect();
+    hands.sort_by_key(|(_, it)| since(it));
+    hands
+}
+
+fn minutes(since: Instant) -> String {
+    format!("{} min", since.elapsed().as_secs() / 60)
+}
+
+fn full(working: &HashMap<String, Working>, at_once: usize) -> Result<()> {
+    if working.len() >= at_once {
+        let ids: Vec<&str> = working.keys().map(String::as_str).collect();
+        bail!(
+            "no hand can start now: only {at_once} may work at once, and {} already are ({}). Wait until one is done, or dismiss one, then try again. Don't work around it by doing the work yourself.",
+            working.len(),
+            ids.join(", ")
+        )
+    }
+    Ok(())
 }
 
 fn remove_if_of(waiting: &mut HashMap<String, Waiting>, conversation: &str, id: &str) -> Option<Waiting> {
@@ -131,7 +208,9 @@ pub struct Workshop {
 }
 
 impl Workshop {
+    /// Before a hand is set up, so a refused one costs nothing.
     pub fn refuse_if_busy(&self, project: &Path) -> Result<()> {
+        self.runtime.hands.refuse_if_full()?;
         let project = project.canonicalize().with_context(|| format!("{} does not exist", project.display()))?;
         match self.runtime.hands.working_in(&project) {
             Some(id) => bail!("hand {id} is still working in {}; wait for it, or dismiss it, before starting another there", project.display()),
@@ -144,6 +223,7 @@ impl Workshop {
     }
 
     pub fn send_back(&self, id: &str, notes: &str) -> Result<String> {
+        self.runtime.hands.refuse_if_full()?;
         let hand = self.runtime.hands.take(self.conversation.key(), id)?;
         self.send_to_work(hand, notes)
     }
@@ -152,8 +232,13 @@ impl Workshop {
         self.runtime.hands.dismiss(self.conversation.key(), id)
     }
 
+    pub fn described(&self) -> String {
+        self.runtime.hands.described(self.conversation.key())
+    }
+
     /// Written down before it starts, so that if she is stopped while it
-    /// works, its thread is told when she is back.
+    /// works, its thread is told when she is back. One that lost the last
+    /// place to another thread in the meantime is kept, to send back later.
     fn send_to_work(&self, hand: Hand, ask: &str) -> Result<String> {
         let id = hand.id().to_string();
         let project = hand.project().to_string_lossy().into_owned();
@@ -162,15 +247,23 @@ impl Workshop {
         store.hand_at_work(&id, &self.conversation.origin(), self.standing == Standing::Trusted, &project, &clock::timestamp())?;
 
         let started = Arc::new(Started::default());
-        self.runtime.hands.began(key, &hand, started.clone());
+        let left = match self.runtime.hands.began(key, &hand, ask, started.clone()) {
+            Ok(left) => left,
+            Err(error) => {
+                store.hand_done(&id)?;
+                self.runtime.hands.wait(key, hand);
+                return Err(error);
+            }
+        };
         self.runtime.at_work.hand_began(key, &id, &project);
         let workshop = self.clone();
         let ask = ask.to_string();
         thread::spawn(move || workshop.round(hand, &ask, &started));
 
         Ok(format!(
-            "Hand {id} is at work. When it's done and reviewed, what it did comes to you as a message of its own, in a turn of its own — nothing waits on it here. \
-             Nobody can reach you while this turn runs, so end it now unless there is something else for you to do meanwhile."
+            "Hand {id} is at work. {} When it's done and reviewed, what it did comes to you as a message of its own, in a turn of its own — nothing waits on it here. \
+             Nobody can reach you while this turn runs, so end it now unless there is something else for you to do meanwhile.",
+            places_left(left)
         ))
     }
 
@@ -227,6 +320,14 @@ impl Workshop {
     }
 }
 
+fn places_left(left: usize) -> String {
+    match left {
+        0 => "That was the last place: no other hand, yours or another thread's, can start until one at work is done or dismissed.".to_string(),
+        1 => "1 more hand can start, across all your threads, until one is done.".to_string(),
+        left => format!("{left} more hands can start, across all your threads, until one is done."),
+    }
+}
+
 fn verdict_told(id: &str, verdict: &Verdict, hand: &mut Hand) -> String {
     if verdict.accepted {
         format!("Hand {id} is done and the reviewer accepted the work.\n\nWhat was done: {}", verdict.summary)
@@ -273,14 +374,14 @@ mod tests {
 
     #[test]
     fn a_thread_reaches_only_hands_that_are_its_own() {
-        let hands = Hands::default();
+        let hands = Hands::new(2);
         let refused = hands.dismiss("card-1", "h404").unwrap_err().to_string();
         assert!(refused.contains("there is no hand h404"), "{refused}");
 
         let started = Arc::new(Started::default());
         hands.working.lock().unwrap().insert(
             "h1".to_string(),
-            Working { conversation: "card-1".to_string(), project: PathBuf::from("/srv/shop"), started: started.clone() },
+            Working { started: started.clone(), ..working("card-1", "/srv/shop", "Fix the sign-in form") },
         );
         assert!(hands.are_working());
         assert_eq!(hands.working_in(Path::new("/srv/shop")).as_deref(), Some("h1"));
@@ -296,6 +397,50 @@ mod tests {
         assert!(started.is_over(), "dismissing a hand at work stops it");
         hands.ended("h1");
         assert!(!hands.are_working());
+    }
+
+    #[test]
+    fn a_hand_beyond_those_allowed_at_once_is_refused_until_one_is_done() {
+        let hands = Hands::new(2);
+        hands.refuse_if_full().unwrap();
+        hands.working.lock().unwrap().insert("h1".to_string(), working("card-1", "/srv/shop", "Fix the sign-in form"));
+        hands.refuse_if_full().unwrap();
+        hands.working.lock().unwrap().insert("h2".to_string(), working("card-2", "/srv/blog", "Draft the release notes"));
+
+        let refused = hands.refuse_if_full().unwrap_err().to_string();
+        assert!(refused.starts_with("no hand can start now: only 2 may work at once, and 2 already are"), "{refused}");
+        assert!(refused.contains("h1") && refused.contains("h2"), "{refused}");
+
+        hands.ended("h2");
+        hands.refuse_if_full().unwrap();
+
+        assert_eq!(places_left(0), "That was the last place: no other hand, yours or another thread's, can start until one at work is done or dismissed.");
+        assert_eq!(places_left(2), "2 more hands can start, across all your threads, until one is done.");
+    }
+
+    #[test]
+    fn a_thread_sees_every_hand_at_work_but_only_its_own_briefs() {
+        let hands = Hands::new(2);
+        hands.working.lock().unwrap().insert("h1".to_string(), working("card-1", "/srv/shop", "Fix the sign-in form"));
+        hands.working.lock().unwrap().insert("h2".to_string(), working("card-2", "/srv/blog", "Draft the release notes"));
+
+        let told = hands.described("card-1");
+        assert_eq!(
+            told,
+            "2 of 2 hands may work at once are at work.\
+             \n- h1, yours, working in /srv/shop for 0 min. Asked: Fix the sign-in form\
+             \n- h2, another thread's, working in /srv/blog for 0 min"
+        );
+    }
+
+    fn working(conversation: &str, project: &str, asked: &str) -> Working {
+        Working {
+            conversation: conversation.to_string(),
+            project: PathBuf::from(project),
+            asked: asked.to_string(),
+            since: Instant::now(),
+            started: Arc::new(Started::default()),
+        }
     }
 
     #[test]

@@ -50,6 +50,12 @@ pub struct Config {
     /// and cut off at a hand's limit it would take the hand at work with it.
     #[serde(default = "six_hours")]
     pub minutes_per_thread_turn: u64,
+    /// How many hands may work at once, across all her threads; past it a
+    /// hand is refused. Every thread woken together — after a restart, or
+    /// once the allowance is back — would otherwise start one each, and they
+    /// eat a day's allowance in minutes.
+    #[serde(default = "one")]
+    pub hands_at_once: usize,
     #[serde(default)]
     pub models: Models,
 }
@@ -138,6 +144,10 @@ fn six_hours() -> u64 {
     2 * three_hours()
 }
 
+fn one() -> usize {
+    1
+}
+
 fn anna() -> String {
     "Anna".to_string()
 }
@@ -161,6 +171,7 @@ impl Default for Config {
             rotate_accounts: true,
             minutes_per_run: three_hours(),
             minutes_per_thread_turn: six_hours(),
+            hands_at_once: one(),
             models: Models::default(),
         }
     }

@@ -86,6 +86,7 @@ impl Runtime {
 
         let database = paths::database();
         let held_open = Mutex::new(Store::open_at(&database)?);
+        let hands = Arc::new(Hands::new(config.hands_at_once));
 
         Ok(Runtime {
             config,
@@ -99,7 +100,7 @@ impl Runtime {
             outside,
             at_work: Arc::new(AtWork::default()),
             turns: Arc::new(Turns::default()),
-            hands: Arc::new(Hands::default()),
+            hands,
             _database_held_open: held_open,
             _proxy: proxy,
         })
