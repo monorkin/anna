@@ -8,6 +8,7 @@ mod clock;
 mod config;
 mod control;
 mod conversation;
+mod cooling;
 mod dash;
 mod dash_ansi;
 mod dash_chat;

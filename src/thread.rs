@@ -132,6 +132,7 @@ pub fn wake(runtime: &Arc<Runtime>, conversation: Arc<dyn Conversation>, standin
     let endpoint = Endpoint::open(&paths::socket(&format!("thread-{key}")), tools)?;
 
     logs::event("thread.woken", json!({ "conversation": key }));
+    runtime.cooling.woke(&key);
     let mut session = Session::of(&directory)?;
     let memory = Supervision::begin(&directory, &key)?;
     let mut message = with_the_board(runtime, conversation.as_ref(), message);
@@ -170,12 +171,14 @@ pub fn wake(runtime: &Arc<Runtime>, conversation: Arc<dyn Conversation>, standin
                 conversation.say(&runtime.editor.polish(&reply.result, &sent_back)?)?;
             }
             logs::event("thread.slept", json!({ "conversation": key, "session": reply.session_id }));
+            runtime.cooling.went_quiet(runtime, &key, &reply.session_id);
             Ok(None)
         }
         Err(error) => match error.downcast_ref::<OutOfTime>() {
             Some(out_of_time) => {
                 session.keep()?;
                 logs::event("thread.out_of_time", json!({ "conversation": key, "minutes": out_of_time.minutes }));
+                runtime.cooling.went_quiet(runtime, &key, &session.id);
                 // Where there is one way to answer, the notice goes out as
                 // is. Where the thread answers with its own tools, it has to
                 // be the one to say it — in a turn of its own, since this

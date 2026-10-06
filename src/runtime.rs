@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::at_work::AtWork;
+use crate::cooling::Cooling;
 use crate::claude;
 use crate::config::{self, Config};
 use crate::editor::Editor;
@@ -48,6 +49,8 @@ pub struct Runtime {
     pub at_work: Arc<AtWork>,
     /// Every conversation's queue of turns.
     pub turns: Arc<Turns>,
+    /// When each quiet thread is compacted, before its cache goes cold.
+    pub cooling: Arc<Cooling>,
     /// Every thread's hands, which work on between their thread's turns.
     pub hands: Arc<Hands>,
     /// One connection open for as long as she runs. Everything else opens
@@ -100,6 +103,7 @@ impl Runtime {
             outside,
             at_work: Arc::new(AtWork::default()),
             turns: Arc::new(Turns::default()),
+            cooling: Arc::new(Cooling::default()),
             hands,
             _database_held_open: held_open,
             _proxy: proxy,
