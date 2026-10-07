@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread as os_thread;
 use std::time::Duration;
 
@@ -26,6 +26,7 @@ use crate::clock;
 use crate::config::Source;
 use crate::control::{self, Controls};
 use crate::conversation::{self, Conversation, Origin, Standing, Terminal};
+use crate::cooling;
 use crate::github;
 use crate::judge::{Judge, Screening};
 use crate::logs;
@@ -45,6 +46,7 @@ const MOST_WAITS_FOR_QUOTA: u32 = 120;
 pub fn run() -> Result<()> {
     let _only_one = control::be_the_only_one()?;
     let runtime = Arc::new(Runtime::start()?);
+    let _ = RUNNING.set(runtime.clone());
     let turns = runtime.turns.clone();
     let mut pokes = HashMap::new();
     for (name, source) in runtime.config.sources.clone() {
@@ -68,7 +70,7 @@ pub fn run() -> Result<()> {
     stop_on_signals();
     timekeeper::keep_time(&runtime, &turns);
     if runtime.config.rotate_accounts {
-        accounts::rotate();
+        accounts::rotate(&runtime);
     }
 
     if let Err(error) = pick_up_where_she_left_off(&runtime, &turns) {
@@ -204,15 +206,28 @@ fn thread_on_the_board(store: &Store, named: &str) -> Result<Origin> {
 /// Stopping takes everything Anna started with her: threads, hands,
 /// reviewers, and whatever those started. SIGINT and SIGTERM end the same
 /// way, so ctrl+c, `anna stop` and `systemctl stop` all leave nothing behind.
+/// The threads that were in the middle of a turn are compacted before she
+/// goes; nothing new starts meanwhile, and the turns that were stopped stay
+/// kept, to be asked again when she is back.
 fn stop() -> ! {
+    STOPPING.store(true, Ordering::Relaxed);
     logs::event("anna.stopping", json!({}));
+    let stopped = RUNNING.get().map(|runtime| runtime.cooling.running()).unwrap_or_default();
     claude::stop_everything_started_by(std::process::id() as libc::pid_t);
+    cooling::compact_the_stopped(stopped);
     control::forget_socket();
     paths::sweep_sockets(true);
     std::process::exit(0);
 }
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+static STOPPING: AtomicBool = AtomicBool::new(false);
+/// For `stop`, which a signal can call from anywhere.
+static RUNNING: OnceLock<Arc<Runtime>> = OnceLock::new();
+
+pub fn is_stopping() -> bool {
+    STOPPING.load(Ordering::Relaxed)
+}
 
 extern "C" fn request_stop(_signal: libc::c_int) {
     STOP_REQUESTED.store(true, Ordering::Relaxed);
@@ -478,7 +493,10 @@ pub fn wake_in_turn(runtime: &Arc<Runtime>, turns: &Arc<Turns>, conversation: Ar
                 }
                 Err(error) => {
                     logs::event("thread.failed", json!({ "conversation": conversation.key(), "error": format!("{error:#}"), "kept": kept.is_some() }));
-                    let _ = conversation.say("Something broke on my side before I could finish this. I've kept what you asked and I'll come back to it.");
+                    // Stopped, not broken: it is asked again when she is back
+                    if !is_stopping() {
+                        let _ = conversation.say("Something broke on my side before I could finish this. I've kept what you asked and I'll come back to it.");
+                    }
                 }
             }
         }),

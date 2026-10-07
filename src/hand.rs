@@ -125,6 +125,14 @@ impl Hand {
         self.rejections
     }
 
+    /// One more turn in its session after it was stopped part way. A hand
+    /// stopped in its first round has a session all the same, only not one
+    /// that has answered yet.
+    pub fn last_word(&mut self, ask: &str, outside: &Outside, started: &Started) -> Result<String> {
+        self.begun = true;
+        self.work(ask, outside, started)
+    }
+
     pub fn work(&mut self, brief: &str, outside: &Outside, started: &Started) -> Result<String> {
         self.asked.push(brief.to_string());
         if self.begun {

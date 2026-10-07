@@ -269,7 +269,7 @@ pub fn random_session_id() -> Result<String> {
 /// Claude Code says it in a sentence, not a code: "You've hit your session
 /// limit · resets 8:20pm", "Claude usage limit reached", "You've hit your
 /// monthly spend limit".
-fn says_the_subscription_is_used_up(said: &str) -> bool {
+pub fn says_the_subscription_is_used_up(said: &str) -> bool {
     let said = said.to_lowercase();
     said.contains("limit") && ["session", "usage", "weekly", "monthly", "spend", "resets", "reached"].iter().any(|it| said.contains(it))
 }

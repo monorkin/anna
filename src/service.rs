@@ -6,7 +6,8 @@
 //! setup was run with, because a user service starts with next to none and
 //! Anna needs claude, bwrap, socat and whatever the MCP servers are.
 //! `KillMode=control-group` is systemd's version of what `anna stop` does
-//! herself: nothing she started outlives her.
+//! herself: nothing she started outlives her. She takes a while to go — the
+//! threads she stopped mid-turn are compacted first — so systemd waits.
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -69,6 +70,7 @@ fn unit(agent: &str, executable: &Path, search_path: &str) -> String {
          Restart=on-failure\n\
          RestartSec=10\n\
          KillMode=control-group\n\
+         TimeoutStopSec=5min\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
@@ -120,6 +122,7 @@ mod tests {
         assert!(unit.contains("ExecStart=/opt/anna/bin/anna run\n"));
         assert!(unit.contains("Environment=PATH=/opt/tools/bin:/usr/bin\n"));
         assert!(unit.contains("KillMode=control-group\n"));
+        assert!(unit.contains("TimeoutStopSec=5min\n"), "stopping waits for the threads she stopped to be compacted");
         assert!(unit.contains("WantedBy=default.target\n"));
     }
 }

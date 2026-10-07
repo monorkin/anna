@@ -46,6 +46,7 @@ mod skills;
 mod source;
 mod source_cli;
 mod store;
+mod switching;
 mod thread;
 mod thread_tools;
 mod timekeeper;

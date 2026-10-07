@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use crate::claude::Started;
 use crate::clock;
 use crate::conversation::{Conversation, Standing};
-use crate::dispatcher::{conversation_at, wake_in_turn};
+use crate::dispatcher::{self, conversation_at, wake_in_turn};
 use crate::hand::Hand;
 use crate::judge::Screening;
 use crate::logs;
@@ -30,6 +30,7 @@ use crate::store::Store;
 
 const ROUNDS_BEFORE_RETHINKING: u32 = 3;
 const HOURS_A_HAND_WAITS: u64 = 12;
+const LAST_WORD: &str = "You have been stopped part way: the Claude account you run on is being switched, and you won't get to go on. Don't do any more work. In a few short lines, say what is done, what isn't, and where the folder stands — what is changed, committed, broken — so whoever picks this up next can start from there.";
 
 /// Every hand she has, across turns and conversations. A thread only ever
 /// reaches its own, and has no more than `per_thread` at work: a thread
@@ -38,6 +39,7 @@ pub struct Hands {
     waiting: Mutex<HashMap<String, Waiting>>,
     working: Mutex<HashMap<String, Working>>,
     per_thread: usize,
+    stopped_for_a_switch: Mutex<HashSet<String>>,
 }
 
 struct Waiting {
@@ -56,11 +58,27 @@ struct Working {
 
 impl Hands {
     pub fn new(per_thread: usize) -> Hands {
-        Hands { waiting: Mutex::default(), working: Mutex::default(), per_thread }
+        Hands { waiting: Mutex::default(), working: Mutex::default(), per_thread, stopped_for_a_switch: Mutex::default() }
     }
 
     pub fn are_working(&self) -> bool {
         !self.working.lock().unwrap().is_empty()
+    }
+
+    /// Every hand at work is stopped, and each is asked for its account of
+    /// where it stood before it goes. How many there were.
+    pub fn stop_all_for_a_switch(&self) -> usize {
+        let working = self.working.lock().unwrap();
+        let mut stopped = self.stopped_for_a_switch.lock().unwrap();
+        for (id, it) in working.iter() {
+            stopped.insert(id.clone());
+            it.started.stop_all();
+        }
+        working.len()
+    }
+
+    fn stopped_for_a_switch(&self, id: &str) -> bool {
+        self.stopped_for_a_switch.lock().unwrap().remove(id)
     }
 
     /// Every turn ends here, so a hand whose thread never came back to it
@@ -267,11 +285,21 @@ impl Workshop {
         let outcome = hand
             .work(ask, outside, started)
             .and_then(|report| reviewer::review(&hand, &hand.asked(), &report, outside, started));
+        if dispatcher::is_stopping() {
+            // Left as it is, so her next start tells its thread the hand is gone
+            return;
+        }
+        // Asked while it still counts as at work, so the switch waits for it
+        let last_word = self.runtime.hands.stopped_for_a_switch(&id).then(|| hand.last_word(LAST_WORD, outside, &Started::default()));
         self.runtime.at_work.hand_ended(self.conversation.key(), &id);
         self.runtime.hands.ended(&id);
         let _ = Store::open_at(&self.runtime.database).and_then(|store| store.hand_done(&id));
 
-        if started.is_over() {
+        if let Some(last_word) = last_word {
+            let told = self.told_of_a_switch(&id, &hand, last_word);
+            hand.discard();
+            wake_in_turn(&self.runtime, &self.runtime.turns, self.conversation.clone(), self.standing, told);
+        } else if started.is_over() {
             logs::event("hand.stopped", json!({ "hand": id }));
             hand.discard();
         } else {
@@ -289,6 +317,21 @@ impl Workshop {
             };
             wake_in_turn(&self.runtime, &self.runtime.turns, self.conversation.clone(), self.standing, told);
         }
+    }
+
+    /// What the hand says is screened as a review is: it comes from inside
+    /// a project, and goes straight to the thread.
+    fn told_of_a_switch(&self, id: &str, hand: &Hand, last_word: Result<String>) -> String {
+        let project = hand.project().display();
+        let stopped = format!("Hand {id} was stopped because you were moving to another Claude account, and is gone. What it changed in {project} stays.");
+        let account = match last_word {
+            Ok(said) => match self.runtime.judge.screen(&said) {
+                Screening::Clear => format!("Its own account of where it stood:\n\n{said}"),
+                _ => "Its account of where it stood couldn't be passed on; look at the folder yourself.".to_string(),
+            },
+            Err(error) => format!("It couldn't say where it stood ({error:#}); look at the folder yourself."),
+        };
+        format!("{stopped}\n\n{account}\n\nStart a new hand from there if the work isn't done.")
     }
 
     fn telling(&self, id: &str, verdict: &Verdict, hand: &mut Hand) -> String {
@@ -405,6 +448,21 @@ mod tests {
 
         assert_eq!(places_left(0), "That was your last: you can't start another hand until this one's verdict comes, or you dismiss it.");
         assert_eq!(places_left(2), "You can start 2 more hands until one is done.");
+    }
+
+    #[test]
+    fn a_switch_stops_every_hand_and_each_is_asked_for_its_last_word_once() {
+        let hands = Hands::new(1);
+        let (shop, blog) = (working("card-1", "/srv/shop", "Fix the sign-in form"), working("card-2", "/srv/blog", "Draft the release notes"));
+        let (shop_started, blog_started) = (shop.started.clone(), blog.started.clone());
+        hands.working.lock().unwrap().insert("h1".to_string(), shop);
+        hands.working.lock().unwrap().insert("h2".to_string(), blog);
+
+        assert_eq!(hands.stop_all_for_a_switch(), 2);
+        assert!(shop_started.is_over() && blog_started.is_over());
+        assert!(hands.stopped_for_a_switch("h1"));
+        assert!(!hands.stopped_for_a_switch("h1"), "asked once");
+        assert!(!hands.stopped_for_a_switch("h3"), "a hand dismissed by its thread isn't asked");
     }
 
     #[test]

@@ -4,13 +4,16 @@
 //! starts next. What is already running on the old login is moved by its
 //! caller, which knows what it was in the middle of.
 
+use ax::auto_switch::Decision;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::logs;
+use crate::runtime::Runtime;
+use crate::switching;
 
 const SWITCH_AT_PERCENT: f64 = 90.0;
 /// ax answers from its last reading when the endpoint was asked in the past
@@ -20,15 +23,20 @@ const SECONDS_A_SWITCH_ANSWERS_FOR: u64 = 300;
 
 static ROTATING: AtomicBool = AtomicBool::new(false);
 
-/// ax's auto-switch for as long as Anna runs. Only what changes is logged: a
-/// switch, or a check that failed.
-pub fn rotate() {
+/// ax's auto-switch for as long as Anna runs, winding down before each
+/// switch. Only what changes is logged: a switch, or a check that failed.
+pub fn rotate(runtime: &Arc<Runtime>) {
     ROTATING.store(true, Ordering::Relaxed);
-    thread::spawn(|| {
+    let runtime = runtime.clone();
+    thread::spawn(move || {
         let mut last = String::new();
         loop {
-            let outcome = match ax::auto_switch::tick(SWITCH_AT_PERCENT) {
-                Ok(outcome) => outcome,
+            let outcome = match ax::auto_switch::decide(SWITCH_AT_PERCENT) {
+                Ok(Decision::Stay(why)) => why,
+                Ok(Decision::Switch(switch)) => {
+                    logs::event("accounts.switching", json!({ "from": switch.from(), "to": switch.to() }));
+                    switching::wind_down_then(&runtime, || switch.carry_out()).unwrap_or_else(|error| format!("switch failed: {error:#}"))
+                }
                 Err(error) => format!("check failed: {error:#}"),
             };
             if outcome != last && !outcome.contains("staying put") {

@@ -12,7 +12,7 @@
 //! this way — they don't read memory, and what they write isn't trusted
 //! enough to become it.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use katami::supervisor::Supervision;
 use serde_json::json;
 use std::fs::{self, File};
@@ -27,6 +27,7 @@ use std::time::Duration;
 use crate::broker::{self, Endpoint, Tool};
 use crate::claude::{self, OutOfTime};
 use crate::conversation::{Conversation, Standing};
+use crate::dispatcher;
 use crate::editor::SentBack;
 use crate::github;
 use crate::held::ReadHeldBack;
@@ -35,6 +36,7 @@ use crate::memory_tools;
 use crate::paths;
 use crate::runtime::Runtime;
 use crate::schedule_tools::{CancelSchedule, ListSchedules, Schedule};
+use crate::switching;
 use crate::work_tools::{self, ClaimWork, FinishWork, ListWork, TellThread};
 use crate::thread_tools::{ClaudeUsage, Dismiss, ListHands, Reply, SendBack, StartHand};
 use crate::workshop::Workshop;
@@ -109,6 +111,10 @@ const ON_ANOTHER_MODEL: &str = "\n\n(Your last try at this stopped part way beca
 /// One turn. Answers with what the thread has to be woken with next, when
 /// the turn ended in a way only the thread itself can tell the person about.
 pub fn wake(runtime: &Arc<Runtime>, conversation: Arc<dyn Conversation>, standing: Standing, message: &str) -> Result<Option<String>> {
+    switching::wait_while_winding_down();
+    if dispatcher::is_stopping() {
+        bail!("she is stopping; this is asked again when she is back");
+    }
     let key = conversation.key().to_string();
     let directory = paths::thread_dir(&key);
     fs::create_dir_all(&directory)?;
@@ -145,8 +151,8 @@ pub fn wake(runtime: &Arc<Runtime>, conversation: Arc<dyn Conversation>, standin
     let endpoint = Endpoint::open(&paths::socket(&format!("thread-{key}")), tools)?;
 
     logs::event("thread.woken", json!({ "conversation": key }));
-    runtime.cooling.woke(&key);
     let mut session = Session::of(&directory)?;
+    runtime.cooling.woke(&key, &session.id);
     let memory = Supervision::begin(&directory, &key)?;
     let mut message = with_the_board(runtime, conversation.as_ref(), message);
     let role = role(runtime, standing, answered_otherwise.as_deref());
@@ -166,6 +172,7 @@ pub fn wake(runtime: &Arc<Runtime>, conversation: Arc<dyn Conversation>, standin
             // cleaned out — so the conversation starts over, and says so
             logs::event("thread.session_gone", json!({ "conversation": key, "session": session.id }));
             session = Session::fresh(&directory)?;
+            runtime.cooling.woke(&key, &session.id);
             message = format!("{message}\n\n(Your earlier session in this conversation is gone, so you are starting from here without its history.)");
             let mut again = turn(&directory, &endpoint, &session, standing, &role, model, time_limit)?;
             memory.cover(&mut again);
@@ -174,6 +181,7 @@ pub fn wake(runtime: &Arc<Runtime>, conversation: Arc<dyn Conversation>, standin
             outcome
         }
     });
+    runtime.cooling.turn_over(&key);
     memory.finish();
     runtime.hands.let_go_of_forgotten();
 
