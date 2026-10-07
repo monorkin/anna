@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::broker::Tool;
+use crate::broker::{Tool, on_trust};
 use crate::config::Config;
 use crate::conversation::Standing;
 use crate::editor::{Editor, SentBack};
@@ -97,14 +97,16 @@ impl Catalog {
     }
 
     /// What a thread is offered. A turn on the word of someone who isn't
-    /// trusted doesn't get the tools of a server that acts as the person
-    /// Anna works for: they could otherwise have her do things in that
-    /// person's name.
+    /// trusted can't use the tools of a server that acts as the person Anna
+    /// works for: they could otherwise have her do things in that person's
+    /// name.
     pub fn for_standing(&self, standing: Standing, sent_back: &Arc<SentBack>, spoke: &Arc<AtomicBool>) -> Vec<Box<dyn Tool>> {
         self.tools
             .iter()
-            .filter(|it| standing == Standing::Trusted || !it.trusted_only)
-            .map(|it| Box::new(Offering { offered: it.clone(), sent_back: sent_back.clone(), spoke: spoke.clone() }) as Box<dyn Tool>)
+            .map(|it| {
+                let offering = Box::new(Offering { offered: it.clone(), sent_back: sent_back.clone(), spoke: spoke.clone() });
+                if it.trusted_only { on_trust(offering, standing) } else { offering }
+            })
             .collect()
     }
 
@@ -349,8 +351,11 @@ mod tests {
         // A server that acts as the person: never for a turn on an untrusted word
         assert_eq!(catalog.grant(&["my_inbox".to_string()], trusted).unwrap().len(), 1);
         assert!(catalog.grant(&["my_inbox".to_string()], Standing::CanAssignWork).is_err());
-        let offered_to_anyone: Vec<String> = catalog.for_standing(Standing::CanAssignWork, &turn, &spoke).iter().map(|it| it.name().to_string()).collect();
-        assert_eq!(offered_to_anyone, ["mail_search", "mail_threads", "mail_digest"]);
+        let untrusted = catalog.for_standing(Standing::CanAssignWork, &turn, &spoke);
+        let offered_to_anyone: Vec<String> = untrusted.iter().map(|it| it.name().to_string()).collect();
+        assert_eq!(offered_to_anyone, ["mail_search", "mail_threads", "mail_digest", "my_inbox"], "offered alike, so Claude's cache holds across turns");
+        let refused = untrusted.iter().find(|it| it.name() == "my_inbox").unwrap().call(&json!({}));
+        assert_eq!(refused.unwrap_err().to_string(), crate::broker::REFUSED_WITHOUT_TRUST);
     }
 
     #[test]

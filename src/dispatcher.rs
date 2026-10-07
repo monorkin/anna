@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread as os_thread;
 use std::time::Duration;
 
@@ -46,7 +46,6 @@ const MOST_WAITS_FOR_QUOTA: u32 = 120;
 pub fn run() -> Result<()> {
     let _only_one = control::be_the_only_one()?;
     let runtime = Arc::new(Runtime::start()?);
-    let _ = RUNNING.set(runtime.clone());
     let turns = runtime.turns.clone();
     let mut pokes = HashMap::new();
     for (name, source) in runtime.config.sources.clone() {
@@ -206,15 +205,14 @@ fn thread_on_the_board(store: &Store, named: &str) -> Result<Origin> {
 /// Stopping takes everything Anna started with her: threads, hands,
 /// reviewers, and whatever those started. SIGINT and SIGTERM end the same
 /// way, so ctrl+c, `anna stop` and `systemctl stop` all leave nothing behind.
-/// The threads that were in the middle of a turn are compacted before she
-/// goes; nothing new starts meanwhile, and the turns that were stopped stay
-/// kept, to be asked again when she is back.
+/// Every thread still cached is compacted before she goes; nothing new
+/// starts meanwhile, and the turns that were stopped stay kept, to be asked
+/// again when she is back.
 fn stop() -> ! {
     STOPPING.store(true, Ordering::Relaxed);
     logs::event("anna.stopping", json!({}));
-    let stopped = RUNNING.get().map(|runtime| runtime.cooling.running()).unwrap_or_default();
     claude::stop_everything_started_by(std::process::id() as libc::pid_t);
-    cooling::compact_the_stopped(stopped);
+    cooling::compact_the_warm();
     control::forget_socket();
     paths::sweep_sockets(true);
     std::process::exit(0);
@@ -222,8 +220,6 @@ fn stop() -> ! {
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static STOPPING: AtomicBool = AtomicBool::new(false);
-/// For `stop`, which a signal can call from anywhere.
-static RUNNING: OnceLock<Arc<Runtime>> = OnceLock::new();
 
 pub fn is_stopping() -> bool {
     STOPPING.load(Ordering::Relaxed)
@@ -451,7 +447,8 @@ fn heard_as(people: &BTreeMap<String, String>, source: &Source, message: &Messag
 }
 
 /// Wakes the conversation's thread on a thread of its own, after whatever
-/// turn that conversation already has running.
+/// turn that conversation already has running, with everything said to it
+/// meanwhile on the same standing.
 /// Every turn is written down before it is queued and taken out once it is
 /// over, so stopping Anna — or her crashing — loses nothing: what was
 /// waiting and what was in the middle of running are still there when she
@@ -473,17 +470,24 @@ pub fn wake_in_turn(runtime: &Arc<Runtime>, turns: &Arc<Turns>, conversation: Ar
             None
         }
     };
+    runtime.mailbox.post(&key, standing, said, kept);
 
     turns.add(
         &key,
         Box::new(move || {
+            let Some(post) = runtime.mailbox.take(conversation.key()) else {
+                return;
+            };
+            let standing = post.standing;
             // A turn that finished is done with, however it went. One that
             // broke is still owed: it stays on the queue, and the next start
             // asks it again, because what was said may have reached nobody
-            match wake_once_there_is_quota(&runtime, &conversation, standing, &said) {
+            match wake_once_there_is_quota(&runtime, &conversation, standing, &post.said) {
                 Ok(next) => {
-                    if let Some(id) = kept {
-                        let _ = Store::open_at(&runtime.database).and_then(|store| store.forget_turn(id));
+                    if let Ok(store) = Store::open_at(&runtime.database) {
+                        for id in post.kept {
+                            let _ = store.forget_turn(id);
+                        }
                     }
                     // What the thread has to tell the person itself — that
                     // it ran out of time — is its next turn, ahead of nothing
@@ -492,7 +496,7 @@ pub fn wake_in_turn(runtime: &Arc<Runtime>, turns: &Arc<Turns>, conversation: Ar
                     }
                 }
                 Err(error) => {
-                    logs::event("thread.failed", json!({ "conversation": conversation.key(), "error": format!("{error:#}"), "kept": kept.is_some() }));
+                    logs::event("thread.failed", json!({ "conversation": conversation.key(), "error": format!("{error:#}"), "kept": !post.kept.is_empty() }));
                     // Stopped, not broken: it is asked again when she is back
                     if !is_stopping() {
                         let _ = conversation.say("Something broke on my side before I could finish this. I've kept what you asked and I'll come back to it.");

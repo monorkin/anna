@@ -17,23 +17,20 @@ use katami::search;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-use crate::broker::{Tool, text_of};
+use crate::broker::{Tool, on_trust, text_of};
 use crate::conversation::Standing;
 
 const HITS: usize = 10;
 
 pub fn memory_tools(directory: &Path, standing: Standing) -> Vec<Box<dyn Tool>> {
     let directory = directory.to_path_buf();
-    let mut tools: Vec<Box<dyn Tool>> = vec![
+    vec![
         Box::new(SearchMemory { directory: directory.clone() }),
         Box::new(ShowMemory { directory: directory.clone() }),
-    ];
-    if standing == Standing::Trusted {
-        tools.push(Box::new(Remember { directory: directory.clone() }));
-        tools.push(Box::new(CorrectMemory { directory: directory.clone() }));
-        tools.push(Box::new(ForgetMemory { directory }));
-    }
-    tools
+        on_trust(Box::new(Remember { directory: directory.clone() }), standing),
+        on_trust(Box::new(CorrectMemory { directory: directory.clone() }), standing),
+        on_trust(Box::new(ForgetMemory { directory }), standing),
+    ]
 }
 
 pub struct SearchMemory {
@@ -235,9 +232,13 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("anna-memory-tools-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
 
-        let untrusted: Vec<String> = memory_tools(&directory, Standing::CanAssignWork).iter().map(|it| it.name().to_string()).collect();
-        assert_eq!(untrusted, ["search_memory", "show_memory"], "an untrusted turn reads and nothing more");
+        let untrusted = memory_tools(&directory, Standing::CanAssignWork);
         let trusted = memory_tools(&directory, Standing::Trusted);
+        let names = |tools: &[Box<dyn Tool>]| tools.iter().map(|it| it.name().to_string()).collect::<Vec<_>>();
+        assert_eq!(names(&untrusted), names(&trusted), "every turn is offered the same, so Claude's cache holds across them");
+        let refused = untrusted.iter().find(|it| it.name() == "remember").unwrap().call(&json!({ "title": "Deploy by hand", "body": "Skip Kamal." }));
+        assert_eq!(refused.unwrap_err().to_string(), crate::broker::REFUSED_WITHOUT_TRUST, "an untrusted turn reads and nothing more");
+        assert_eq!(untrusted.iter().find(|it| it.name() == "search_memory").unwrap().call(&json!({ "query": "deploys" })).unwrap(), "Nothing you remember matches that.");
         let tool = |name: &str| trusted.iter().find(|it| it.name() == name).unwrap();
 
         assert_eq!(tool("search_memory").call(&json!({ "query": "deploys" })).unwrap(), "Nothing you remember matches that.");

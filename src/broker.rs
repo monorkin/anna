@@ -9,7 +9,7 @@
 //! The protocol is MCP's stdio framing, one JSON-RPC message per line, and
 //! only the part sessions use: initialize, tools/list, tools/call, ping.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Instant;
 
+use crate::conversation::Standing;
 use crate::logs;
 use crate::paths;
 
@@ -30,6 +31,43 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn input_schema(&self) -> Value;
     fn call(&self, arguments: &Value) -> Result<String>;
+}
+
+/// A tool only a trusted turn may use, offered in every turn all the same.
+/// What a turn is offered is part of what Claude caches, so a turn offered
+/// less than the one before it writes the whole session again. Instead an
+/// untrusted turn sees the tool and is refused when it calls it.
+pub struct OnTrust {
+    tool: Box<dyn Tool>,
+    trusted: bool,
+}
+
+pub const REFUSED_WITHOUT_TRUST: &str = "Not in this turn: it runs on the word of someone you don't take direction from, so this needs one of the people you do.";
+
+pub fn on_trust(tool: Box<dyn Tool>, standing: Standing) -> Box<dyn Tool> {
+    Box::new(OnTrust { tool, trusted: standing == Standing::Trusted })
+}
+
+impl Tool for OnTrust {
+    fn name(&self) -> &str {
+        self.tool.name()
+    }
+
+    fn description(&self) -> &str {
+        self.tool.description()
+    }
+
+    fn input_schema(&self) -> Value {
+        self.tool.input_schema()
+    }
+
+    fn call(&self, arguments: &Value) -> Result<String> {
+        if self.trusted {
+            self.tool.call(arguments)
+        } else {
+            bail!(REFUSED_WITHOUT_TRUST)
+        }
+    }
 }
 
 /// A tool's string argument, which has to say something.

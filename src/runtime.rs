@@ -20,6 +20,7 @@ use crate::editor::Editor;
 use crate::github;
 use crate::judge::Judge;
 use crate::logs;
+use crate::mailbox::Mailbox;
 use crate::mcp::Catalog;
 use crate::paths;
 use crate::proxy::{self, Proxy};
@@ -49,6 +50,8 @@ pub struct Runtime {
     pub at_work: Arc<AtWork>,
     /// Every conversation's queue of turns.
     pub turns: Arc<Turns>,
+    /// What is said to each conversation while its thread is busy.
+    pub mailbox: Arc<Mailbox>,
     /// When each quiet thread is compacted, before its cache goes cold.
     pub cooling: Arc<Cooling>,
     /// Every thread's hands, which work on between their thread's turns.
@@ -103,6 +106,7 @@ impl Runtime {
             outside,
             at_work: Arc::new(AtWork::default()),
             turns: Arc::new(Turns::default()),
+            mailbox: Arc::new(Mailbox::default()),
             cooling: Arc::new(Cooling::default()),
             hands,
             _database_held_open: held_open,

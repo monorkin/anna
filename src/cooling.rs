@@ -9,9 +9,10 @@
 //! How long the cache lives isn't fixed. It is read from the session's own
 //! transcript: each call says which lifetime its cache write was for.
 //!
-//! A thread stopped in the middle of a turn is compacted on the way out:
-//! its cache is as warm as it gets, and after a stop the cache is cold by
-//! the time she is back.
+//! Every thread still cached is compacted on the way out, since after a stop
+//! the cache is cold by the time she is back. Only what all of that missed
+//! is compacted cold, when the thread next wakes, before its turn — which
+//! pays to load the session just to throw it away, so it is the last resort.
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -55,8 +56,7 @@ impl Cooling {
         self.running.lock().unwrap().remove(conversation);
     }
 
-    /// Each conversation with a turn running, and that turn's session. Taken
-    /// before the turns are stopped, since a stopped turn is over.
+    /// Each conversation with a turn running, and that turn's session.
     pub fn running(&self) -> Vec<(String, String)> {
         self.running.lock().unwrap().clone().into_iter().collect()
     }
@@ -118,16 +118,34 @@ fn compact_before_it_goes_cold(runtime: &Arc<Runtime>, conversation: &str, sessi
     Ok(())
 }
 
-/// The sessions of turns that were stopped, all at once, and back when every
-/// one is done.
-pub fn compact_the_stopped(stopped: Vec<(String, String)>) {
-    let compacting: Vec<_> = stopped
+/// The last line of defence, for what compacting while still cached missed
+/// — a compaction the account had no room for, a crash. A session that went
+/// cold while it was big is compacted before the turn that wakes it. That
+/// pays to load the whole session only to throw it away, which is why it
+/// comes last; it still beats the turn reading all of it on every call.
+pub fn compact_if_cold(conversation: &str, session: &str) {
+    let Ok(last) = last_call_of(conversation, session) else {
+        return;
+    };
+    if last.context >= WORTH_COMPACTING && gone_cold(&last, Utc::now()) {
+        match compact(conversation, session, &last.model) {
+            Ok(()) => logs::event("thread.compacted", json!({ "conversation": conversation, "tokens": last.context, "cold": true })),
+            Err(error) => logs::event("thread.not_compacted", json!({ "conversation": conversation, "because": format!("{error:#}") })),
+        }
+    }
+}
+
+/// On the way out, every session still cached, all at once: after a stop the
+/// cache is cold by the time she is back, and compacting now reads what is
+/// cached rather than writing it all again. Back when every one is done.
+pub fn compact_the_warm() {
+    let warm: Vec<_> = worth_compacting().into_iter().filter(|(_, _, last)| !gone_cold(last, Utc::now())).collect();
+    let compacting: Vec<_> = warm
         .into_iter()
-        .map(|(conversation, session)| {
-            thread::spawn(move || {
-                if let Err(error) = compact_now(&conversation, &session) {
-                    logs::event("thread.not_compacted", json!({ "conversation": conversation, "because": format!("{error:#}") }));
-                }
+        .map(|(conversation, session, last)| {
+            thread::spawn(move || match compact(&conversation, &session, &last.model) {
+                Ok(()) => logs::event("thread.compacted", json!({ "conversation": conversation, "tokens": last.context })),
+                Err(error) => logs::event("thread.not_compacted", json!({ "conversation": conversation, "because": format!("{error:#}") })),
             })
         })
         .collect();
@@ -141,17 +159,7 @@ pub fn compact_the_stopped(stopped: Vec<(String, String)>) {
 /// were used. Once the account says it has nothing left, the rest stay as
 /// they are. How many were compacted.
 pub fn compact_every_thread() -> usize {
-    let mut sessions: Vec<(String, String, LastCall)> = fs::read_dir(paths::data_dir().join("threads"))
-        .map(|it| it.flatten().collect::<Vec<_>>())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|entry| {
-            let conversation = entry.file_name().to_string_lossy().into_owned();
-            let session = fs::read_to_string(entry.path().join("session")).ok()?.trim().to_string();
-            let last = last_call_of(&conversation, &session).ok()?;
-            (last.context >= WORTH_COMPACTING).then_some((conversation, session, last))
-        })
-        .collect();
+    let mut sessions = worth_compacting();
     cheapest_first(&mut sessions, Utc::now());
 
     let mut compacted = 0;
@@ -182,18 +190,28 @@ pub fn compact_every_thread() -> usize {
     compacted
 }
 
-/// Still cached before gone cold, and the most recently used first in each.
-fn cheapest_first<T>(sessions: &mut [(T, T, LastCall)], now: DateTime<Utc>) {
-    sessions.sort_by_key(|(_, _, last)| (last.at + last.cache_lives < now, std::cmp::Reverse(last.at)));
+/// Each thread's session that is big enough to be worth compacting.
+fn worth_compacting() -> Vec<(String, String, LastCall)> {
+    fs::read_dir(paths::data_dir().join("threads"))
+        .map(|it| it.flatten().collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| {
+            let conversation = entry.file_name().to_string_lossy().into_owned();
+            let session = fs::read_to_string(entry.path().join("session")).ok()?.trim().to_string();
+            let last = last_call_of(&conversation, &session).ok()?;
+            (last.context >= WORTH_COMPACTING).then_some((conversation, session, last))
+        })
+        .collect()
 }
 
-fn compact_now(conversation: &str, session: &str) -> Result<()> {
-    let last = last_call_of(conversation, session)?;
-    if last.context >= WORTH_COMPACTING {
-        compact(conversation, session, &last.model)?;
-        logs::event("thread.compacted", json!({ "conversation": conversation, "tokens": last.context }));
-    }
-    Ok(())
+/// Still cached before gone cold, and the most recently used first in each.
+fn cheapest_first<T>(sessions: &mut [(T, T, LastCall)], now: DateTime<Utc>) {
+    sessions.sort_by_key(|(_, _, last)| (gone_cold(last, now), std::cmp::Reverse(last.at)));
+}
+
+fn gone_cold(last: &LastCall, now: DateTime<Utc>) -> bool {
+    last.at + last.cache_lives < now
 }
 
 fn last_call_of(conversation: &str, session: &str) -> Result<LastCall> {
@@ -315,6 +333,16 @@ mod tests {
 
         assert_eq!(last_call(&call("2026-10-06T09:00:00Z", 1_000, 0, 0)), None, "nothing written, nothing known");
         assert_eq!(last_call(""), None);
+    }
+
+    #[test]
+    fn a_session_counts_as_cold_once_its_cache_has_outlived_its_lifetime() {
+        let last = last_call(&call("2026-10-06T09:00:00Z", 0, 400_000, 0)).unwrap();
+        assert!(!gone_cold(&last, "2026-10-06T09:59:00Z".parse().unwrap()), "an hour's cache is still there at 59 minutes");
+        assert!(gone_cold(&last, "2026-10-06T10:01:00Z".parse().unwrap()));
+
+        let short = last_call(&call("2026-10-06T09:00:00Z", 0, 0, 90_000)).unwrap();
+        assert!(gone_cold(&short, "2026-10-06T09:06:00Z".parse().unwrap()), "a five-minute cache is gone after six");
     }
 
     #[test]

@@ -25,6 +25,7 @@ mod held;
 mod judge;
 mod lifecycle;
 mod logs;
+mod mailbox;
 mod mcp;
 mod mcp_cli;
 mod mcp_server;
