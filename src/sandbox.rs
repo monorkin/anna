@@ -66,6 +66,10 @@ const CARGO_INSIDE: &str = "/home/hand/.cargo";
 /// Where `cargo` is mbx, first on the PATH. In the session's own /tmp: it is
 /// written as the session starts, and goes with it.
 const MBX_SHIM_INSIDE: &str = "/tmp/mbx";
+/// mbx's gc runs after every build, and its default budgets evicted other
+/// worktrees' live target folders mid-run. A hand never sees mbx's config
+/// files, so the budgets come from its environment.
+const MBX_BUDGETS: [(&str, &str); 2] = [("MBX_TARGET_MAX_SIZE", "300GiB"), ("MBX_GC_MAX_SIZE", "120GiB")];
 
 /// A port on the host's loopback that a session may reach as the same port
 /// on its own: a database for the tests, say. On the host, socat listens on
@@ -312,6 +316,9 @@ impl Sandbox<'_> {
         if let Some(mbx) = &self.outside.toolchains.mbx {
             command.arg("--bind").arg(&mbx.store).arg(&mbx.store);
             command.arg("--setenv").arg("MBX_CACHE_DIR").arg(&mbx.store);
+            for (name, value) in MBX_BUDGETS {
+                command.arg("--setenv").arg(name).arg(value);
+            }
         }
     }
 
@@ -834,6 +841,45 @@ mod tests {
         assert!(!builds_in_its_own_folder(&arguments_of(&sandbox("linked", false))), "a reviewer builds where the hand's link leads");
         assert!(builds_in_its_own_folder(&arguments_of(&sandbox("fresh", false))), "a reviewer can't make the link");
         assert!(builds_in_its_own_folder(&arguments_of(&sandbox("own-build", true))), "the person's own target folder is never built into");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_hand_gets_mbx_budgets_that_keep_every_live_target() {
+        let root = std::env::temp_dir().join(format!("anna-sandbox-mbx-budgets-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let store = root.join("store");
+        fs::create_dir_all(root.join("project")).unwrap();
+        fs::create_dir_all(&store).unwrap();
+        let outside = |mbx: Option<Mbx>| Outside {
+            proxy_socket: PathBuf::from("/run/anna/proxy.sock"),
+            toolchains: Toolchains { mbx, ..Toolchains::default() },
+            time_limit: Duration::from_secs(60),
+            gitconfig: None,
+            scopes: false,
+            models: Models::default(),
+        };
+        let sandbox = |outside| Sandbox {
+            project: root.join("project"),
+            profile: PathBuf::from("/data/hands/h1/profile"),
+            outside,
+            broker_socket: None,
+            writable: true,
+            build_dir: PathBuf::from("/data/builds/abc"),
+            services: Vec::new(),
+            registries: None,
+            scratch: PathBuf::from("/data/hands/h1"),
+        };
+        let budgeted = |arguments: &[String], name: &str, value: &str| arguments.windows(3).any(|it| it[0] == "--setenv" && it[1] == name && it[2] == value);
+
+        let with_mbx = outside(Some(Mbx { binary: PathBuf::from("/installs/mr-boxington/1.10.0/mbx"), store }));
+        let arguments = arguments_of(&sandbox(&with_mbx));
+        assert!(budgeted(&arguments, "MBX_TARGET_MAX_SIZE", "300GiB"), "target folders other worktrees build in are kept");
+        assert!(budgeted(&arguments, "MBX_GC_MAX_SIZE", "120GiB"));
+
+        let without_mbx = outside(None);
+        let arguments = arguments_of(&sandbox(&without_mbx));
+        assert!(!arguments.iter().any(|it| it == "MBX_TARGET_MAX_SIZE" || it == "MBX_GC_MAX_SIZE"), "without mbx there is no budget to set");
         fs::remove_dir_all(root).unwrap();
     }
 }
